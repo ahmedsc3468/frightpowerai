@@ -31,6 +31,7 @@ export default function ShipperDashboard() {
   const navigate = useNavigate();
   const location = useLocation();
   const [activeNav, setActiveNav] = useState('home');
+  const [trackingInitialLoadId, setTrackingInitialLoadId] = useState(null);
   const [initialThreadId, setInitialThreadId] = useState(null);
   const [initialInvoiceId, setInitialInvoiceId] = useState(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
@@ -90,6 +91,29 @@ export default function ShipperDashboard() {
       setNotifLoading(false);
     }
   };
+
+  // Keep unread count fresh (so new bids show up without opening the dropdown).
+  useEffect(() => {
+    if (!currentUser) return;
+    let alive = true;
+
+    const tick = async () => {
+      if (!alive) return;
+      try {
+        await fetchNotifications();
+      } catch {
+        // ignore
+      }
+    };
+
+    // Initial fetch + poll
+    tick();
+    const id = setInterval(tick, AUTO_REFRESH_MS);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [currentUser]);
 
   const markNotificationRead = async (notificationId) => {
     if (!currentUser || !notificationId) return;
@@ -152,6 +176,11 @@ export default function ShipperDashboard() {
   // Dashboard stats state
   const [dashboardStats, setDashboardStats] = useState(null);
   const [statsLoading, setStatsLoading] = useState(true);
+
+  // Home "Active Loads" list data (kept lightweight; Tracking page fetches full view)
+  const [homeLoadsLoading, setHomeLoadsLoading] = useState(false);
+  const [homeLoadsError, setHomeLoadsError] = useState('');
+  const [homeLoads, setHomeLoads] = useState([]);
 
   // AddLoads modal state
   const [showAddLoads, setShowAddLoads] = useState(false);
@@ -242,6 +271,30 @@ export default function ShipperDashboard() {
     }
   };
 
+  const fetchHomeLoads = async () => {
+    if (!currentUser) return;
+    setHomeLoadsLoading(true);
+    setHomeLoadsError('');
+    try {
+      const token = await currentUser.getIdToken();
+      const res = await fetch(`${API_URL}/loads?exclude_drafts=true&page=1&page_size=100`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        setHomeLoads([]);
+        setHomeLoadsError('Failed to load shipments');
+        return;
+      }
+      const data = await res.json();
+      setHomeLoads(Array.isArray(data?.loads) ? data.loads : []);
+    } catch (e) {
+      setHomeLoads([]);
+      setHomeLoadsError(e?.message || 'Failed to load shipments');
+    } finally {
+      setHomeLoadsLoading(false);
+    }
+  };
+
   // Handle editing draft loads
   const handleEditDraft = (draftLoad) => {
     setEditingDraftLoad(draftLoad);
@@ -251,6 +304,12 @@ export default function ShipperDashboard() {
   // Fetch dashboard stats
   useEffect(() => {
     fetchStats();
+  }, [currentUser]);
+
+  // Fetch a small set of loads used by the Home placeholders.
+  useEffect(() => {
+    fetchHomeLoads();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser]);
 
   // Fetch onboarding data on mount
@@ -385,6 +444,44 @@ export default function ShipperDashboard() {
   }, []);
 
   function HomeView() {
+    const normalizeStatus = (s) => String(s || '').trim().toLowerCase();
+    const activeStatuses = new Set(['posted', 'tendered', 'covered', 'accepted', 'awarded', 'dispatched', 'in_transit']);
+    const deliveredStatuses = new Set(['delivered', 'completed']);
+
+    const activeLoads = (homeLoads || []).filter((l) => activeStatuses.has(normalizeStatus(l?.status || l?.load_status)));
+    const deliveredLoads = (homeLoads || []).filter((l) => deliveredStatuses.has(normalizeStatus(l?.status || l?.load_status)));
+
+    const totalCount = Number(dashboardStats?.total_loads || 0) || (homeLoads || []).length;
+    const activeCount = Number(dashboardStats?.active_loads || 0) || activeLoads.length;
+
+    const shortLoadLabel = (l) => {
+      const num = String(l?.load_number || '').trim();
+      if (num) return num;
+      const id = String(l?.load_id || l?.id || '').trim();
+      if (!id) return 'N/A';
+      return id.length > 8 ? id.slice(-8) : id;
+    };
+
+    const badgeForStatus = (s) => {
+      const st = normalizeStatus(s);
+      if (st === 'in_transit') return { cls: 'pending', label: 'In Transit' };
+      if (st === 'covered' || st === 'accepted' || st === 'dispatched') return { cls: 'active', label: 'Assigned' };
+      if (st === 'posted' || st === 'tendered') return { cls: 'pending', label: 'Tendered' };
+      if (st === 'delivered') return { cls: 'active', label: 'Delivered' };
+      if (st === 'completed') return { cls: 'active', label: 'Settled' };
+      return { cls: 'pending', label: st ? st.replace(/_/g, ' ') : 'Active' };
+    };
+
+    const etaText = (l) => {
+      const st = normalizeStatus(l?.status || l?.load_status);
+      if (st === 'delivered' || st === 'completed') {
+        return 'Delivered';
+      }
+      const delivery = String(l?.delivery_date || '').trim();
+      if (delivery) return `ETA: ${delivery}`;
+      return 'ETA: TBD';
+    };
+
     return (
       <>
         <header className="fp-header">
@@ -400,7 +497,18 @@ export default function ShipperDashboard() {
               onChange={handleFileUpload}
               accept=".pdf,.doc,.docx,.jpg,.jpeg,.png"
             />
-            <button className="btn small ghost-cd">Track Shipments</button>
+            <button
+              className="btn small ghost-cd"
+              onClick={() => {
+                const first = (activeLoads || [])[0];
+                const id = String(first?.load_id || first?.id || '').trim();
+                setTrackingInitialLoadId(id || null);
+                setActiveNav('tracking');
+                if (isSidebarOpen) setIsSidebarOpen(false);
+              }}
+            >
+              Track Shipments
+            </button>
           </div>
         </header>
 
@@ -542,21 +650,42 @@ export default function ShipperDashboard() {
           <div className="card active-loads">
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
               <h3>Active Loads</h3>
-              <div className="muted">5 of 24</div>
+              <div className="muted">{activeCount} of {totalCount}</div>
             </div>
             <ul className="active-load-list">
-              <li>
-                <div className="load-left"><strong>#L2401</strong><div className="muted">Chicago → Atlanta</div></div>
-                <div className="load-right"><div className="int-status-badge active">On Time</div><div className="muted small">ETA: 2h 15m</div></div>
-              </li>
-              <li>
-                <div className="load-left"><strong>#L2402</strong><div className="muted">Dallas → Phoenix</div></div>
-                <div className="load-right"><div className="int-status-badge warning">Delayed</div><div className="muted small">ETA: +45m</div></div>
-              </li>
-              <li>
-                <div className="load-left"><strong>#L2403</strong><div className="muted">Miami → Jacksonville</div></div>
-                <div className="load-right"><div className="int-status-badge active">Delivered</div><div className="muted small">30m ago</div></div>
-              </li>
+              {homeLoadsError ? (
+                <li>
+                  <div className="muted">{homeLoadsError}</div>
+                </li>
+              ) : homeLoadsLoading ? (
+                <li>
+                  <div className="muted">Loading shipments…</div>
+                </li>
+              ) : (activeLoads || []).length === 0 ? (
+                <li>
+                  <div className="muted">No active loads yet.</div>
+                </li>
+              ) : (
+                (activeLoads || []).slice(0, 3).map((l) => {
+                  const id = String(l?.load_id || l?.id || Math.random());
+                  const origin = String(l?.origin || l?.load_origin || 'N/A');
+                  const dest = String(l?.destination || l?.load_destination || 'N/A');
+                  const st = l?.status || l?.load_status;
+                  const badge = badgeForStatus(st);
+                  return (
+                    <li key={id}>
+                      <div className="load-left">
+                        <strong>#{shortLoadLabel(l)}</strong>
+                        <div className="muted">{origin} → {dest}</div>
+                      </div>
+                      <div className="load-right">
+                        <div className={`int-status-badge ${badge.cls}`}>{badge.label}</div>
+                        <div className="muted small">{etaText(l)}</div>
+                      </div>
+                    </li>
+                  );
+                })
+              )}
             </ul>
           </div>
 
@@ -702,7 +831,7 @@ export default function ShipperDashboard() {
         </section>
       </div>
     );
-    if (activeNav === 'tracking') return <TrackingVisibility />;
+    if (activeNav === 'tracking') return <TrackingVisibility initialLoadId={trackingInitialLoadId} />;
     if (activeNav === 'doc-vault') return <DocumentVault />;
     if (activeNav === 'finance') return <Finance />;
     if (activeNav === 'bills') return <Bills initialInvoiceId={initialInvoiceId} />;

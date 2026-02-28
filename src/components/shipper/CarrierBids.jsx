@@ -183,7 +183,7 @@ export default function CarrierBids() {
                         </button>
                       </>
                     )}
-                    <button className="btn small ghost-cd" onClick={() => window.location.href = `/loads/${bid.load_id}`}>
+                    <button className="btn small ghost-cd" onClick={() => viewLoadDetails(bid.load_id)}>
                       View Load Details
                     </button>
                   </div>
@@ -196,6 +196,14 @@ export default function CarrierBids() {
       </section>
     </div>
   );
+
+  // Note: There is no standalone /loads/:id route in the app.
+  // Deep-link into the dashboard instead.
+  function viewLoadDetails(loadId) {
+    const id = String(loadId || '').trim();
+    if (!id) return;
+    window.location.href = `/shipper-dashboard?nav=my-loads&load_id=${encodeURIComponent(id)}`;
+  }
 
   async function handleAcceptBid(bid) {
     if (!currentUser) return;

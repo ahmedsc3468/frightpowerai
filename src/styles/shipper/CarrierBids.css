@@ -90,6 +90,7 @@
 
 .bid-route {
   flex: 1;
+  min-width: 0;
 }
 
 .route-cities {
@@ -100,6 +101,15 @@
   font-size: 18px;
   font-weight: 600;
   color: #1e293b;
+  min-width: 0;
+}
+
+.route-cities .origin,
+.route-cities .destination {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .route-arrow {
@@ -119,6 +129,8 @@
   font-size: 14px;
   font-weight: 600;
   text-transform: capitalize;
+  flex-shrink: 0;
+  margin-left: 12px;
 }
 
 .bid-status-badge.status-pending {

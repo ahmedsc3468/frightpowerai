@@ -277,7 +277,7 @@ export default function ShipperMarketplace() {
       });
 
       if (response.ok) {
-        alert('Carrier accepted successfully! Load moved to COVERED status.');
+        alert('Carrier accepted successfully! Load moved to ASSIGNED status.');
         setOffersModalOpen(false);
         // Refresh shipper loads
         window.location.reload();

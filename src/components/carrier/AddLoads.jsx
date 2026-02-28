@@ -59,6 +59,16 @@ export default function AddLoads({ onClose, draftLoad, isShipper = false }) {
     notifyOnLoadCovered: true,
   });
 
+  // Shipper posting: keep visibility strictly public.
+  useEffect(() => {
+    if (!isShipper) return;
+    setFormData(prev => ({
+      ...prev,
+      visibility: 'public',
+      selectedCarriers: [],
+    }));
+  }, [isShipper]);
+
   // Pre-populate form if resuming a draft load
   useEffect(() => {
     if (draftLoad) {
@@ -77,7 +87,7 @@ export default function AddLoads({ onClose, draftLoad, isShipper = false }) {
         setAdditionalRoutes(draftLoad.additional_routes);
       }
       
-      setFormData({
+      const nextFormData = {
         // Step 1
         origin: draftLoad.origin || '',
         destination: draftLoad.destination || '',
@@ -110,7 +120,10 @@ export default function AddLoads({ onClose, draftLoad, isShipper = false }) {
         notifyOnCarrierViews: draftLoad.notify_on_carrier_views !== undefined ? draftLoad.notify_on_carrier_views : true,
         notifyOnOfferReceived: draftLoad.notify_on_offer_received !== undefined ? draftLoad.notify_on_offer_received : true,
         notifyOnLoadCovered: draftLoad.notify_on_load_covered !== undefined ? draftLoad.notify_on_load_covered : true,
-      });
+      };
+
+      // Shipper posting: keep visibility strictly public.
+      setFormData(isShipper ? { ...nextFormData, visibility: 'public', selectedCarriers: [] } : nextFormData);
       
       // Set advanced charges if present
       if (draftLoad.advanced_charges && Array.isArray(draftLoad.advanced_charges)) {
@@ -124,7 +137,7 @@ export default function AddLoads({ onClose, draftLoad, isShipper = false }) {
         setStep(2); // Has route, go to Step 2
       }
     }
-  }, [draftLoad]);
+  }, [draftLoad, isShipper]);
 
   const handleInputChange = (e) => {
     const { name, value, type, checked } = e.target;
@@ -139,6 +152,7 @@ export default function AddLoads({ onClose, draftLoad, isShipper = false }) {
   };
 
   const handleVisibilitySelect = (option) => {
+    if (isShipper) return;
     setFormData(prev => ({ ...prev, visibility: option }));
   };
 
@@ -406,6 +420,8 @@ export default function AddLoads({ onClose, draftLoad, isShipper = false }) {
         'network': 'My Network Only',
         'private': 'Selected Carriers Only'
       };
+
+      const effectiveVisibility = isShipper ? 'public' : formData.visibility;
       
       const response = await fetch(`${API_URL}/loads/${loadId}/step3?status=ACTIVE`, {
         method: 'PATCH',
@@ -414,8 +430,8 @@ export default function AddLoads({ onClose, draftLoad, isShipper = false }) {
           'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({
-          visibility: visibilityMap[formData.visibility] || 'Public',
-          selected_carriers: formData.selectedCarriers,
+          visibility: visibilityMap[effectiveVisibility] || 'Public',
+          selected_carriers: isShipper ? [] : formData.selectedCarriers,
           auto_match_ai: formData.autoMatch,
           instant_booking: formData.instantBooking,
           auto_post_to_freightpower: formData.autoPostToFreightpower,
@@ -461,6 +477,8 @@ export default function AddLoads({ onClose, draftLoad, isShipper = false }) {
         'network': 'My Network Only',
         'private': 'Selected Carriers Only'
       };
+
+      const effectiveVisibility = isShipper ? 'public' : formData.visibility;
       
       const response = await fetch(`${API_URL}/loads/${loadId}/step3?status=DRAFT`, {
         method: 'PATCH',
@@ -469,8 +487,8 @@ export default function AddLoads({ onClose, draftLoad, isShipper = false }) {
           'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({
-          visibility: visibilityMap[formData.visibility] || 'Public',
-          selected_carriers: formData.selectedCarriers,
+          visibility: visibilityMap[effectiveVisibility] || 'Public',
+          selected_carriers: isShipper ? [] : formData.selectedCarriers,
           auto_match_ai: formData.autoMatch,
           instant_booking: formData.instantBooking,
           auto_post_to_freightpower: formData.autoPostToFreightpower,
@@ -1191,20 +1209,30 @@ export default function AddLoads({ onClose, draftLoad, isShipper = false }) {
                       <div className="visibility-desc">Visible to all approved carriers</div>
                     </button>
                     <button
-                      className={`visibility-btn ${formData.visibility === 'network' ? 'active' : ''}`}
+                      className={`visibility-btn ${formData.visibility === 'network' ? 'active' : ''} ${isShipper ? 'disabled' : ''}`}
                       onClick={() => handleVisibilitySelect('network')}
+                      disabled={isShipper}
+                      aria-disabled={isShipper}
+                      title={isShipper ? 'Coming soon' : undefined}
+                      type="button"
                     >
                       <div className="visibility-icon">🤝</div>
                       <div className="visibility-label">My Network</div>
                       <div className="visibility-desc">Preferred and contracted carriers</div>
+                      {isShipper ? <div className="visibility-desc">Coming soon</div> : null}
                     </button>
                     <button
-                      className={`visibility-btn ${formData.visibility === 'private' ? 'active' : ''}`}
+                      className={`visibility-btn ${formData.visibility === 'private' ? 'active' : ''} ${isShipper ? 'disabled' : ''}`}
                       onClick={() => handleVisibilitySelect('private')}
+                      disabled={isShipper}
+                      aria-disabled={isShipper}
+                      title={isShipper ? 'Coming soon' : undefined}
+                      type="button"
                     >
                       <div className="visibility-icon">🔒</div>
                       <div className="visibility-label">Private</div>
                       <div className="visibility-desc">Invitation only, select carriers</div>
+                      {isShipper ? <div className="visibility-desc">Coming soon</div> : null}
                     </button>
                   </div>
                 </div>

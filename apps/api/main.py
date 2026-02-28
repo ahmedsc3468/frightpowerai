@@ -58,7 +58,9 @@ from .messaging import (
 from .scheduler import SchedulerWrapper
 from .finance import router as finance_router, init_finance_scheduler
 from .load_documents import router as load_documents_router, create_load_document_from_url, ensure_rate_confirmation_document
+from .load_workflow import router as load_workflow_router
 from .load_ownership import normalized_fields_for_new_load, normalized_ownership_patch_for_load
+from .load_workflow_utils import is_rate_con_carrier_signed, notify_previous_carriers_new_load, sanitize_load_for_viewer
 from .consents import router as consents_router
 from .calendar_integrations import router as calendar_router
 from .help_center import router as help_center_router
@@ -942,6 +944,221 @@ async def admin_tracking_locations(
         "count": len(items),
         "scanned": scanned,
         "skipped_no_gps": skipped_no_gps,
+    }
+
+
+@app.get("/tracking/loads/locations")
+async def tracking_load_locations(
+    active_only: bool = True,
+    limit: int = 200,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Shipper/Broker tracking: GPS locations for the signed-in user's loads.
+
+    Data source:
+    - Loads are read from Firestore (same ownership rule as GET /loads for shippers): created_by == uid
+    - Location is read from the assigned driver's user profile: users.gps_lat / users.gps_lng
+
+    Notes:
+    - This endpoint is intentionally scoped: shippers/brokers can only see their own loads.
+    - Returns only loads that have an assigned driver AND valid GPS coordinates.
+    """
+
+    uid = user.get("uid")
+    role = str(user.get("role") or "").strip().lower()
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if role not in {"shipper", "broker", "admin", "super_admin"}:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    max_limit = max(1, min(int(limit or 200), 1000))
+    # Shipper tracking map is intentionally limited to IN_TRANSIT loads.
+    active_statuses = {LoadStatus.IN_TRANSIT.value}
+
+    def _pick_name(d: Dict[str, Any] | None) -> Optional[str]:
+        d = d or {}
+        for key in (
+            "company_name",
+            "business_name",
+            "legal_name",
+            "carrier_name",
+            "display_name",
+            "name",
+            "full_name",
+            "email",
+        ):
+            val = d.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        return None
+
+    def _carrier_name_from_load(load_dict: Dict[str, Any], carrier_uid: Optional[str]) -> Optional[str]:
+        name = load_dict.get("assigned_carrier_name") or load_dict.get("carrier_name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+
+        offers = load_dict.get("offers")
+        if isinstance(offers, list):
+            for offer in offers:
+                if not isinstance(offer, dict):
+                    continue
+                if str(offer.get("status") or "").strip().lower() == "accepted":
+                    oname = offer.get("carrier_name")
+                    if isinstance(oname, str) and oname.strip():
+                        return oname.strip()
+            if carrier_uid:
+                for offer in offers:
+                    if not isinstance(offer, dict):
+                        continue
+                    if str(offer.get("carrier_id") or "").strip() == str(carrier_uid).strip():
+                        oname = offer.get("carrier_name")
+                        if isinstance(oname, str) and oname.strip():
+                            return oname.strip()
+
+        return None
+
+    # Phase 1: gather candidate loads + driver uids
+    load_candidates: list[dict] = []
+    driver_uids: set[str] = set()
+    carrier_uids: set[str] = set()
+    scanned = 0
+    skipped_no_driver = 0
+    try:
+        loads_ref = db.collection("loads")
+        query = loads_ref
+        # Shippers/brokers: strict ownership, consistent with GET /loads
+        if role in {"shipper", "broker"}:
+            query = query.where("created_by", "==", uid)
+        # Keep scans bounded; we may skip many because not active / no driver / no GPS.
+        query = query.limit(max_limit * 10)
+
+        for snap in query.stream():
+            scanned += 1
+            if len(load_candidates) >= (max_limit * 10):
+                break
+            d = snap.to_dict() or {}
+            load_id = snap.id
+            status = str(d.get("status") or "").strip().lower()
+            if active_only and status not in active_statuses:
+                continue
+
+            driver_uid = d.get("assigned_driver") or d.get("assigned_driver_id")
+            if not driver_uid:
+                skipped_no_driver += 1
+                continue
+
+            driver_uid = str(driver_uid).strip()
+            if not driver_uid:
+                skipped_no_driver += 1
+                continue
+
+            driver_uids.add(driver_uid)
+
+            carrier_uid = d.get("assigned_carrier") or d.get("assigned_carrier_id") or d.get("carrier_id")
+            carrier_uid = str(carrier_uid).strip() if carrier_uid is not None else None
+            if carrier_uid:
+                carrier_uids.add(carrier_uid)
+
+            load_candidates.append(
+                {
+                    "load_id": load_id,
+                    "status": status,
+                    "driver_uid": driver_uid,
+                    "driver_name": d.get("assigned_driver_name") or d.get("driver_name"),
+                    "carrier_uid": carrier_uid,
+                    "carrier_name": _carrier_name_from_load(d, carrier_uid),
+                    "updated_at": d.get("updated_at"),
+                }
+            )
+    except Exception as e:
+        print(f"[TrackingLoadLocations] Failed to fetch loads: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch load locations")
+
+    # Phase 2: batch fetch driver GPS profiles
+    gps_by_driver: dict[str, dict] = {}
+    driver_name_by_uid: dict[str, str] = {}
+    if driver_uids:
+        try:
+            refs = [db.collection("users").document(did) for did in sorted(driver_uids)]
+            for snap in db.get_all(refs):
+                if not snap or not getattr(snap, "exists", False):
+                    continue
+                u = snap.to_dict() or {}
+                dname = _pick_name(u)
+                if dname:
+                    driver_name_by_uid[snap.id] = dname
+                lat = u.get("gps_lat")
+                lng = u.get("gps_lng")
+                try:
+                    lat_f = float(lat) if lat is not None else None
+                    lng_f = float(lng) if lng is not None else None
+                except Exception:
+                    lat_f = None
+                    lng_f = None
+                if lat_f is None or lng_f is None:
+                    continue
+                gps_by_driver[snap.id] = {
+                    "gps_lat": lat_f,
+                    "gps_lng": lng_f,
+                    "gps_updated_at": u.get("updated_at"),
+                }
+        except Exception as e:
+            print(f"[TrackingLoadLocations] Failed to fetch driver GPS: {e}")
+
+    # Phase 2b: batch fetch carrier profiles (prefer carriers collection, fallback to users)
+    carrier_name_by_uid: dict[str, str] = {}
+    if carrier_uids:
+        try:
+            carrier_refs = [db.collection("carriers").document(cid) for cid in sorted(carrier_uids)]
+            for snap in db.get_all(carrier_refs):
+                if not snap or not getattr(snap, "exists", False):
+                    continue
+                c = snap.to_dict() or {}
+                cname = _pick_name(c)
+                if cname:
+                    carrier_name_by_uid[snap.id] = cname
+        except Exception as e:
+            print(f"[TrackingLoadLocations] Failed to fetch carrier profiles: {e}")
+
+        missing = [cid for cid in carrier_uids if cid not in carrier_name_by_uid]
+        if missing:
+            try:
+                user_refs = [db.collection("users").document(cid) for cid in sorted(missing)]
+                for snap in db.get_all(user_refs):
+                    if not snap or not getattr(snap, "exists", False):
+                        continue
+                    u = snap.to_dict() or {}
+                    cname = _pick_name(u)
+                    if cname:
+                        carrier_name_by_uid[snap.id] = cname
+            except Exception as e:
+                print(f"[TrackingLoadLocations] Failed to fetch carrier user profiles: {e}")
+
+    # Phase 3: join + emit
+    items: list[dict] = []
+    skipped_no_gps = 0
+    for c in load_candidates:
+        gps = gps_by_driver.get(str(c.get("driver_uid") or ""))
+        if not gps:
+            skipped_no_gps += 1
+            continue
+        payload = dict(c)
+        if not payload.get("driver_name"):
+            payload["driver_name"] = driver_name_by_uid.get(str(payload.get("driver_uid") or ""))
+        if not payload.get("carrier_name"):
+            payload["carrier_name"] = carrier_name_by_uid.get(str(payload.get("carrier_uid") or ""))
+        payload.update(gps)
+        items.append(payload)
+        if len(items) >= max_limit:
+            break
+
+    return {
+        "items": items,
+        "count": len(items),
+        "scanned": scanned,
+        "skipped_no_driver": skipped_no_driver,
+        "skipped_no_gps": skipped_no_gps,
+        "active_only": bool(active_only),
     }
 
 
@@ -3493,6 +3710,7 @@ async def update_load_step3(
     - "DRAFT": Settings saved but load remains draft for later posting
     """
     uid = user['uid']
+    user_role = user.get('role', 'carrier')
     
     # Get existing load
     existing_load = store.get_load(load_id)
@@ -3540,6 +3758,17 @@ async def update_load_step3(
         "total_distance": float(total_distance),
         "total_price": float(total_price),
     }
+
+    # Initialize workflow status when a shipper/broker posts the load.
+    # Do not overwrite a later-stage workflow status (e.g., Tendered/Awarded).
+    if status == "ACTIVE" and user_role in ["shipper", "broker"]:
+        try:
+            existing_ws = str((existing_load or {}).get("workflow_status") or "").strip()
+            if not existing_ws:
+                updates["workflow_status"] = "Posted"
+                updates["workflow_status_updated_at"] = time.time()
+        except Exception:
+            pass
     
     # Update in storage
     updated_load = store.update_load(load_id, updates)
@@ -3551,6 +3780,19 @@ async def update_load_step3(
         log_action(uid, "LOAD_POST", f"Posted load {load_id} - Step 3 completed")
     except Exception as e:
         print(f"Warning: Could not update load in Firestore: {e}")
+
+    # Notify previous carriers when a shipper/broker posts a new load (best-effort).
+    if status == "ACTIVE" and user.get("role") in ["shipper", "broker"]:
+        try:
+            frontend_base_url = str(getattr(settings, "FRONTEND_BASE_URL", "") or "").rstrip("/") or None
+            notify_previous_carriers_new_load(
+                db=db,
+                shipper_uid=str(uid),
+                load={"load_id": load_id, **(updated_load or {}), **updates},
+                frontend_base_url=frontend_base_url,
+            )
+        except Exception as e:
+            print(f"Warning: notify_previous_carriers_new_load failed: {e}")
     
     # Trigger auto-match if enabled
     matches = []
@@ -3901,6 +4143,87 @@ async def list_loads(
       1. Loads they posted themselves (created_by=uid)
       2. Loads they won from shippers (assigned_carrier=uid, status=COVERED+)
     """
+
+    def _coerce_load_complete_min_fields(d: Dict[str, Any], *, viewer_uid: str, viewer_role: str) -> Dict[str, Any]:
+        """Best-effort compatibility for legacy/incomplete load docs.
+
+        The /loads endpoint historically returned a strict `LoadComplete` model.
+        Some Firestore documents may use legacy field names or be missing required fields,
+        causing them to be silently skipped and the UI to show 0 loads.
+
+        This function fills ONLY the minimal required `LoadComplete` fields with safe defaults
+        and maps a few legacy keys to the current schema.
+        """
+
+        out: Dict[str, Any] = dict(d or {})
+
+        def _first_str(*vals: Any) -> str:
+            for v in vals:
+                s = str(v or "").strip()
+                if s:
+                    return s
+            return ""
+
+        def _to_float(v: Any) -> Optional[float]:
+            try:
+                if v is None:
+                    return None
+                if isinstance(v, (int, float)):
+                    f = float(v)
+                    return f if f > 0 else None
+                s = str(v).strip()
+                if not s:
+                    return None
+                f = float(s)
+                return f if f > 0 else None
+            except Exception:
+                return None
+
+        # Normalize common legacy key variants
+        if "equipment_type" not in out and "equipmentType" in out:
+            out["equipment_type"] = out.get("equipmentType")
+        if "pickup_date" not in out and "pickupDate" in out:
+            out["pickup_date"] = out.get("pickupDate")
+        if "delivery_date" not in out and "deliveryDate" in out:
+            out["delivery_date"] = out.get("deliveryDate")
+        if "created_by" not in out and "createdBy" in out:
+            out["created_by"] = out.get("createdBy")
+
+        now = float(time.time())
+
+        # Required: created_by
+        if not _first_str(out.get("created_by")):
+            # For shipper/broker views, falling back to viewer uid is reasonable.
+            if str(viewer_role or "").lower() in {"shipper", "broker"}:
+                out["created_by"] = str(viewer_uid)
+            else:
+                out["created_by"] = "unknown"
+
+        # Required: created_at / updated_at (float seconds)
+        out.setdefault("created_at", _to_float(out.get("created_at")) or _to_float(out.get("createdAt")) or now)
+        out.setdefault("updated_at", _to_float(out.get("updated_at")) or _to_float(out.get("updatedAt")) or out.get("created_at") or now)
+
+        # Required: origin/destination
+        out.setdefault("origin", _first_str(out.get("origin"), out.get("load_origin"), out.get("pickup"), out.get("pickup_location")))
+        out.setdefault(
+            "destination",
+            _first_str(out.get("destination"), out.get("load_destination"), out.get("delivery"), out.get("delivery_location")),
+        )
+
+        # Required: pickup_date, equipment_type, weight
+        out.setdefault("pickup_date", _first_str(out.get("pickup_date"), out.get("pickup")))
+        out.setdefault("equipment_type", _first_str(out.get("equipment_type"), out.get("equipment"), out.get("mode"), "Unknown"))
+
+        weight = out.get("weight")
+        if weight is None or (isinstance(weight, str) and not weight.strip()):
+            weight = out.get("weight_lbs") or out.get("weightLbs") or out.get("weight_lb") or out.get("weight_pounds")
+        out.setdefault("weight", float(_to_float(weight) or 0.0))
+
+        if not isinstance(out.get("metadata"), dict):
+            out["metadata"] = {}
+
+        return out
+
     uid = user['uid']
     user_role = user.get("role", "carrier")
     
@@ -3915,15 +4238,36 @@ async def list_loads(
         # Shippers see ONLY their own loads (strict ownership check) - read from Firestore
         try:
             loads_ref = db.collection("loads")
+            all_loads = []
+            seen_load_ids = set()
+
+            def _add_stream(stream):
+                for doc in stream:
+                    load = doc.to_dict() or {}
+                    load_id = load.get("load_id") or doc.id
+                    if not load_id or load_id in seen_load_ids:
+                        continue
+                    load["load_id"] = load_id
+                    all_loads.append(load)
+                    seen_load_ids.add(load_id)
+
+            # Primary: modern ownership field.
             query = loads_ref.where("created_by", "==", uid)
             if status:
                 query = query.where("status", "==", status)
-            all_loads_docs = query.stream()
-            all_loads = []
-            for doc in all_loads_docs:
-                load = doc.to_dict()
-                load["load_id"] = doc.id
-                all_loads.append(load)
+            _add_stream(query.stream())
+
+            # Back-compat: normalized payer field.
+            query2 = loads_ref.where("payer_uid", "==", uid)
+            if status:
+                query2 = query2.where("status", "==", status)
+            _add_stream(query2.stream())
+
+            # Back-compat: camelCase ownership field.
+            query3 = loads_ref.where("createdBy", "==", uid)
+            if status:
+                query3 = query3.where("status", "==", status)
+            _add_stream(query3.stream())
         except Exception as e:
             print(f"Error fetching shipper loads from Firestore: {e}")
             # Fallback to local storage
@@ -4080,7 +4424,9 @@ async def list_loads(
             print(f"WARNING: Load missing load_id field: {load.keys()}")
             continue
         try:
-            loads.append(LoadComplete(**load))
+            sanitized = sanitize_load_for_viewer(load, viewer_uid=str(uid), viewer_role=str(user_role))
+            coerced = _coerce_load_complete_min_fields(sanitized, viewer_uid=str(uid), viewer_role=str(user_role))
+            loads.append(LoadComplete(**coerced))
         except Exception as e:
             print(f"ERROR: Failed to convert load {load.get('load_id', 'unknown')} to LoadComplete: {e}")
             import traceback
@@ -4229,9 +4575,15 @@ async def get_load_details(
     if user_role in ["admin", "super_admin"]:
         # Admins can view all loads
         pass
-    elif user_role == "shipper":
-        # Shippers can ONLY view loads they created
-        if load.get("created_by") != uid:
+    elif user_role == "shipper" or user_role == "broker":
+        # Shippers/brokers can ONLY view loads they own.
+        # Support legacy ownership fields.
+        owner_uid = (
+            load.get("created_by")
+            or load.get("payer_uid")
+            or load.get("createdBy")
+        )
+        if owner_uid != uid:
             raise HTTPException(
                 status_code=403,
                 detail="Shippers can only view loads they created"
@@ -4260,8 +4612,69 @@ async def get_load_details(
                 # This is a marketplace load, allow viewing for bidding purposes
                 pass
     
+    sanitized = sanitize_load_for_viewer(load, viewer_uid=str(uid), viewer_role=str(user_role))
+
+    # Best-effort compatibility with legacy loads.
+    try:
+        # Reuse the same compatibility helper used by /loads
+        # (defined inside list_loads for locality; duplicate minimal logic here).
+        def _first_str(*vals: Any) -> str:
+            for v in vals:
+                s = str(v or "").strip()
+                if s:
+                    return s
+            return ""
+
+        def _to_float(v: Any) -> Optional[float]:
+            try:
+                if v is None:
+                    return None
+                if isinstance(v, (int, float)):
+                    f = float(v)
+                    return f if f > 0 else None
+                s = str(v).strip()
+                if not s:
+                    return None
+                f = float(s)
+                return f if f > 0 else None
+            except Exception:
+                return None
+
+        d = dict(sanitized or {})
+        if "equipment_type" not in d and "equipmentType" in d:
+            d["equipment_type"] = d.get("equipmentType")
+        if "pickup_date" not in d and "pickupDate" in d:
+            d["pickup_date"] = d.get("pickupDate")
+        if "delivery_date" not in d and "deliveryDate" in d:
+            d["delivery_date"] = d.get("deliveryDate")
+        if "created_by" not in d and "createdBy" in d:
+            d["created_by"] = d.get("createdBy")
+
+        now = float(time.time())
+        if not _first_str(d.get("created_by")):
+            if str(user_role or "").lower() in {"shipper", "broker"}:
+                d["created_by"] = str(uid)
+            else:
+                d["created_by"] = "unknown"
+        d.setdefault("created_at", _to_float(d.get("created_at")) or _to_float(d.get("createdAt")) or now)
+        d.setdefault("updated_at", _to_float(d.get("updated_at")) or _to_float(d.get("updatedAt")) or d.get("created_at") or now)
+        d.setdefault("origin", _first_str(d.get("origin"), d.get("load_origin"), d.get("pickup"), d.get("pickup_location")))
+        d.setdefault("destination", _first_str(d.get("destination"), d.get("load_destination"), d.get("delivery"), d.get("delivery_location")))
+        d.setdefault("pickup_date", _first_str(d.get("pickup_date"), d.get("pickup")))
+        d.setdefault("equipment_type", _first_str(d.get("equipment_type"), d.get("equipment"), d.get("mode"), "Unknown"))
+        weight = d.get("weight")
+        if weight is None or (isinstance(weight, str) and not weight.strip()):
+            weight = d.get("weight_lbs") or d.get("weightLbs") or d.get("weight_lb") or d.get("weight_pounds")
+        d.setdefault("weight", float(_to_float(weight) or 0.0))
+        if not isinstance(d.get("metadata"), dict):
+            d["metadata"] = {}
+
+        sanitized = d
+    except Exception:
+        pass
+
     return LoadResponse(
-        load=LoadComplete(**load),
+        load=LoadComplete(**sanitized),
         message="Success"
     )
 
@@ -5011,6 +5424,21 @@ async def assign_driver_to_load(
                 status_code=403,
                 detail="You can only assign drivers to loads assigned to your carrier"
             )
+
+        # Dispatch gate (backward compatible): if this load is using the contract workflow,
+        # require carrier signature before assigning a driver.
+        try:
+            contract = load_data.get("contract")
+            if isinstance(contract, dict) and isinstance(contract.get("rate_confirmation"), dict):
+                if not is_rate_con_carrier_signed(load_data):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Carrier must sign the rate confirmation before dispatching a driver"
+                    )
+        except HTTPException:
+            raise
+        except Exception:
+            pass
         
         # Check that driver is hired by this carrier
         driver_ref = db.collection("drivers").document(request.driver_id)
@@ -5433,17 +5861,35 @@ async def carrier_submit_tender(
     # Update Firestore (primary storage)
     try:
         load_ref = db.collection("loads").document(load_id)
-        load_ref.update({
+        patch = {
             "offers": load["offers"],
-            "updated_at": timestamp
-        })
+            "updated_at": timestamp,
+        }
+
+        # Workflow: first bid transitions Posted -> Tendered (best-effort)
+        try:
+            ws = str(load.get("workflow_status") or "").strip()
+            if not ws or ws == "Posted":
+                patch["workflow_status"] = "Tendered"
+                patch["workflow_status_updated_at"] = timestamp
+        except Exception:
+            pass
+
+        load_ref.update(patch)
     except Exception as e:
         print(f"Error updating Firestore: {e}")
         raise HTTPException(status_code=500, detail="Failed to save bid to database")
     
     # Also update local storage as backup
     try:
-        store.update_load(load_id, {"offers": load["offers"], "updated_at": timestamp})
+        store_patch = {"offers": load["offers"], "updated_at": timestamp}
+        try:
+            if (not str(load.get("workflow_status") or "").strip()) or str(load.get("workflow_status") or "").strip() == "Posted":
+                store_patch["workflow_status"] = "Tendered"
+                store_patch["workflow_status_updated_at"] = timestamp
+        except Exception:
+            pass
+        store.update_load(load_id, store_patch)
     except Exception as e:
         print(f"Warning: Could not update local storage: {e}")
     
@@ -5453,7 +5899,13 @@ async def carrier_submit_tender(
     # Create notification for shipper about the new bid
     try:
         shipper_uid = load.get("created_by")
-        if shipper_uid:
+        notify_on_offer_received = True
+        try:
+            notify_on_offer_received = bool(load.get("notify_on_offer_received", True))
+        except Exception:
+            notify_on_offer_received = True
+
+        if shipper_uid and notify_on_offer_received:
             # Get carrier information
             carrier_name = user.get("display_name", user.get("email", "Unknown Carrier"))
             carrier_email = user.get("email", "")
@@ -5471,7 +5923,7 @@ async def carrier_submit_tender(
                 "message": f"{carrier_name} has submitted a bid of ${request.rate} for your load from {load_origin} to {load_destination}.",
                 "resource_type": "bid",
                 "resource_id": offer["offer_id"],
-                "action_url": f"/operations/carrier-bids",
+                "action_url": f"/shipper-dashboard?nav=carrier-bids",
                 "is_read": False,
                 "created_at": int(timestamp),
                 "bid_data": {
@@ -5870,6 +6322,8 @@ async def shipper_accept_carrier(
     timestamp = time.time()
     updates = {
         "status": LoadStatus.COVERED.value,
+        "workflow_status": "Awarded",
+        "workflow_status_updated_at": timestamp,
         "assigned_carrier": request.carrier_id,
         "assigned_carrier_id": request.carrier_id,  # Also set assigned_carrier_id for consistency
         "carrier_id": request.carrier_id,
@@ -5961,6 +6415,39 @@ async def shipper_accept_carrier(
         logs_ref.set(log_entry)
     except Exception as e:
         print(f"Warning: Could not add status log to Firestore: {e}")
+
+    # Notify non-selected carriers that the load was awarded (best-effort).
+    try:
+        rejected_carrier_ids = []
+        for o in offers_list:
+            try:
+                if str(o.get("status") or "").lower() == "rejected":
+                    cid = str(o.get("carrier_id") or "").strip()
+                    if cid and cid != str(request.carrier_id):
+                        rejected_carrier_ids.append(cid)
+            except Exception:
+                continue
+
+        if rejected_carrier_ids:
+            for cid in sorted(set(rejected_carrier_ids)):
+                notif_id = str(uuid.uuid4())
+                db.collection("notifications").document(notif_id).set(
+                    {
+                        "id": notif_id,
+                        "user_id": cid,
+                        "notification_type": "load_awarded",
+                        "title": f"Load {load.get('load_number') or load_id} awarded",
+                        "message": "This load was awarded to another carrier.",
+                        "resource_type": "load",
+                        "resource_id": load_id,
+                        "action_url": f"/carrier-dashboard?nav=marketplace&load_id={load_id}",
+                        "is_read": False,
+                        "created_at": int(timestamp),
+                        "load_id": load_id,
+                    }
+                )
+    except Exception as e:
+        print(f"Warning: could not notify rejected carriers: {e}")
 
     # Auto-generate and attach a Rate Confirmation PDF (best-effort).
     try:
@@ -6684,9 +7171,9 @@ async def get_marketplace_loads(
                     continue
             
             if creator_role in ["shipper", "broker"]:
-                marketplace_loads.append(load)
+                marketplace_loads.append(sanitize_load_for_viewer(load, viewer_uid=str(uid), viewer_role=str(user_role)))
             elif creator_role == "carrier" and created_by != uid:
-                marketplace_loads.append(load)
+                marketplace_loads.append(sanitize_load_for_viewer(load, viewer_uid=str(uid), viewer_role=str(user_role)))
         
         # Apply pagination
         total = len(marketplace_loads)
@@ -6720,7 +7207,7 @@ async def get_marketplace_loads(
             if load.get("creator_role") in ["shipper", "broker"] or (
                 load.get("creator_role") == "carrier" and load.get("created_by") != uid
             ):
-                marketplace_loads.append(load)
+                marketplace_loads.append(sanitize_load_for_viewer(load, viewer_uid=str(uid), viewer_role=str(user_role)))
         total = len(marketplace_loads)
         start_idx = (page - 1) * page_size
         end_idx = start_idx + page_size
@@ -8138,6 +8625,7 @@ app.include_router(onboarding_router)
 app.include_router(messaging_router)
 app.include_router(finance_router)
 app.include_router(load_documents_router)
+app.include_router(load_workflow_router)
 app.include_router(consents_router)
 app.include_router(calendar_router)
 app.include_router(help_center_router)

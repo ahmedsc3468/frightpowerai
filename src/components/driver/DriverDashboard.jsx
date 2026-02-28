@@ -1673,7 +1673,7 @@ export default function DriverDashboard() {
                       style={{width: '20px', height: '20px', cursor: 'pointer', accentColor: '#22c55e'}}
                     />
                     <span style={{fontSize: '0.95rem', fontWeight: '600', color: pickupCompleted ? '#16a34a' : ddTheme.muted}}>
-                      {pickupCompleted ? tr('driverDashboard.postHire.pickupCompleted', 'Pickup Completed ✓') : tr('driverDashboard.postHire.markPickupComplete', 'Mark Pickup Complete')}
+                      {pickupCompleted ? tr('driverDashboard.postHire.pickupCompletedShort', '✓ Pickup Completed') : tr('driverDashboard.postHire.markPickup', 'Mark Pickup')}
                     </span>
                   </label>
                 </div>
@@ -1756,7 +1756,7 @@ export default function DriverDashboard() {
                       style={{width: '20px', height: '20px', cursor: pickupCompleted ? 'pointer' : 'not-allowed', accentColor: '#22c55e'}}
                     />
                     <span style={{fontSize: '0.95rem', fontWeight: '600', color: deliveryCompleted ? '#16a34a' : ddTheme.muted}}>
-                      {deliveryCompleted ? tr('driverDashboard.postHire.delivered', 'Delivered ✓') : tr('driverDashboard.postHire.markDeliveryComplete', 'Mark Delivery Complete')}
+                      {deliveryCompleted ? tr('driverDashboard.postHire.deliveredShort', '✓ Delivered') : tr('driverDashboard.postHire.markDelivery', 'Mark Delivery')}
                     </span>
                   </label>
                 </div>

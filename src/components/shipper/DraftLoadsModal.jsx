@@ -194,6 +194,10 @@ export default function DraftLoadsModal({ onClose, onEditDraft }) {
                     transition: 'all 0.2s',
                     boxShadow: '0 1px 2px rgba(0,0,0,0.05)'
                   }}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => handleEditDraft(load)}
+                  onKeyDown={(e) => e.key === 'Enter' && handleEditDraft(load)}
                   onMouseEnter={e => {
                     e.currentTarget.style.boxShadow = '0 4px 6px rgba(0,0,0,0.1)';
                     e.currentTarget.style.borderColor = '#3b82f6';
@@ -293,7 +297,10 @@ export default function DraftLoadsModal({ onClose, onEditDraft }) {
 
                   <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
                     <button
-                      onClick={() => handleEditDraft(load)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleEditDraft(load);
+                      }}
                       style={{
                         padding: '10px 24px',
                         background: '#3b82f6',
@@ -315,7 +322,10 @@ export default function DraftLoadsModal({ onClose, onEditDraft }) {
                       Edit
                     </button>
                     <button
-                      onClick={() => handleDeleteDraft(load.load_id)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDeleteDraft(load.load_id);
+                      }}
                       disabled={deletingId === load.load_id}
                       style={{
                         padding: '10px 24px',

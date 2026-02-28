@@ -418,11 +418,26 @@ async def upload_load_document(
     if not _can_access_load_documents(load, user.get("uid"), user.get("role")):
         raise HTTPException(status_code=403, detail="Not authorized to upload documents for this load")
 
+    kind_upper = str(kind or "OTHER").strip().upper()
+    if kind_upper == "BOL" and load.get("bol_locked_at"):
+        raise HTTPException(status_code=400, detail="BOL is locked after pickup and cannot be modified")
+
     filename = file.filename or "file"
     ext = ("." + filename.split(".")[-1].lower()) if "." in filename else ""
     if ext not in _ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Only PDF, JPG, JPEG, and PNG files are supported")
 
     data = await file.read()
-    record = upload_load_document_bytes(load=load, kind=kind, filename=filename, data=data, actor=user, source="upload")
+    record = upload_load_document_bytes(load=load, kind=kind_upper, filename=filename, data=data, actor=user, source="upload")
+
+    # For workflow/UI convenience, mirror RC metadata onto the load root.
+    try:
+        if kind_upper == "RATE_CONFIRMATION" and record and record.get("doc_id"):
+            db.collection("loads").document(str(load_id)).set(
+                {"rate_confirmation_doc_id": record.get("doc_id"), "rate_confirmation_url": record.get("url")},
+                merge=True,
+            )
+    except Exception:
+        pass
+
     return record

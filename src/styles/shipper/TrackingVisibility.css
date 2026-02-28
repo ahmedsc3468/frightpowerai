@@ -114,3 +114,55 @@
   .btn { padding:8px 10px; font-size:13px; }
   .tl-item {display: flex; flex-direction: column; justify-content: center; text-align: center;}
 }
+
+/* Compact load details block inside the right panel */
+.tv-load-details { margin-top: 12px; padding: 12px; border: 1px solid #eef2f6; border-radius: 10px; background: #fff; }
+.dark-root .tv-load-details { background:#2c2c2c; border-color:#3c3c3c; }
+.tv-load-details-title { font-weight: 800; margin-bottom: 10px; }
+.tv-load-details-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; }
+.tv-load-details-item { min-width: 0; }
+.tv-load-details-k { font-size: 12px; color: #64748b; font-weight: 700; }
+.dark-root .tv-load-details-k { color: #9ca3af; }
+.tv-load-details-v { margin-top: 3px; font-weight: 650; color: #111827; overflow-wrap: anywhere; }
+.dark-root .tv-load-details-v { color: #e5e7eb; }
+
+@media (max-width: 520px) {
+  .tv-load-details-grid { grid-template-columns: 1fr; }
+}
+
+/* Full-width horizontal status progress bar */
+.tv-status-fullwidth { margin-top: 14px; }
+.tv-status-progress-card { width: 100%; background: #fff; border: 1px solid #e6eef2; border-radius: 8px; padding: 18px; box-sizing: border-box; }
+.dark-root .tv-status-progress-card { background:#2c2c2c; border-color:#3c3c3c; color:#d1d5db; }
+
+.tv-status-progress-header { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom: 10px; }
+.tv-status-progress-title { font-weight: 800; }
+.tv-status-progress-picker { display:flex; align-items:center; gap:8px; font-weight: 700; font-size: 13px; color: #475569; }
+.dark-root .tv-status-progress-picker { color: #d1d5db; }
+
+.tv-status-progress-scroll { overflow-x: auto; }
+.tv-status-progress-inner { min-width: 980px; padding: 8px 18px 12px; box-sizing: border-box; }
+
+.tv-status-progress-labels { display: grid; grid-template-columns: repeat(13, 1fr); gap: 10px; font-size: 12px; font-weight: 700; color: #374151; }
+.dark-root .tv-status-progress-labels { color: #d1d5db; }
+.tv-status-progress-label { text-align: center; white-space: nowrap; padding: 8px 4px; }
+
+.tv-status-progress-track { position: relative; height: 30px; margin-top: 6px; margin-left: 6px; margin-right: 6px; }
+.tv-status-progress-track::before { content: ''; position: absolute; left: 0; right: 0; top: 12px; height: 6px; background: #eef2f6; border-radius: 999px; }
+.dark-root .tv-status-progress-track::before { background:#3c3c3c; }
+
+/* Use existing green palette from this stylesheet */
+.tv-status-progress-fill { position: absolute; left: 0; top: 12px; height: 6px; background: #bbf7d0; border-radius: 999px; }
+.dark-root .tv-status-progress-fill { background:#0f766e; }
+
+.tv-status-progress-knob { position: absolute; top: 6px; transform: translateX(-50%); width: 18px; height: 18px; border-radius: 999px; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 900; }
+.tv-status-progress-knob.is-todo { background: #fff; border: 2px solid #cbd5e1; color: #94a3b8; }
+.dark-root .tv-status-progress-knob.is-todo { background:#2c2c2c; border-color:#64748b; color:#94a3b8; }
+.tv-status-progress-knob.is-done { background: #10b981; border: 2px solid #10b981; color: #ffffff; }
+
+.tv-status-progress-knob.is-current { box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.25); }
+.tv-status-progress-check { line-height: 1; }
+
+@media (max-width: 900px) {
+  .tv-status-progress-inner { min-width: 860px; }
+}

@@ -23,6 +23,9 @@ export default function HereMap({
   polyline = null,
   onMapReady = null,
   onMarkerClick = null,
+  autoFitMarkers = true,
+  autoCenterSingleMarker = true,
+  singleMarkerZoom = null,
   height = '400px',
   width = '100%'
 }) {
@@ -185,8 +188,8 @@ export default function HereMap({
             map.addObject(mapMarker);
           });
 
-          // Fit map to show all markers
-          if (markers.length > 1) {
+          // Adjust viewport
+          if (autoFitMarkers && markers.length > 1) {
             const group = new window.H.map.Group();
             markers.forEach(m => {
               group.addObject(new window.H.map.Marker({ lat: m.lat, lng: m.lng }));
@@ -194,6 +197,16 @@ export default function HereMap({
             map.getViewModel().setLookAtData({
               bounds: group.getBoundingBox()
             });
+          } else if (autoCenterSingleMarker && markers.length === 1) {
+            const m = markers[0];
+            try {
+              map.getViewModel().setLookAtData({
+                position: { lat: m.lat, lng: m.lng },
+                zoom: Number.isFinite(Number(singleMarkerZoom)) ? Number(singleMarkerZoom) : zoom,
+              });
+            } catch (e) {
+              // ignore
+            }
           }
         }
 
@@ -303,7 +316,7 @@ export default function HereMap({
     });
 
     // Fit to bounds
-    if (markers.length > 1) {
+    if (autoFitMarkers && markers.length > 1) {
       const group = new window.H.map.Group();
       markers.forEach(m => {
         group.addObject(new window.H.map.Marker({ lat: m.lat, lng: m.lng }));
@@ -311,8 +324,18 @@ export default function HereMap({
       mapInstance.getViewModel().setLookAtData({
         bounds: group.getBoundingBox()
       });
+    } else if (autoCenterSingleMarker && markers.length === 1) {
+      const m = markers[0];
+      try {
+        mapInstance.getViewModel().setLookAtData({
+          position: { lat: m.lat, lng: m.lng },
+          zoom: Number.isFinite(Number(singleMarkerZoom)) ? Number(singleMarkerZoom) : zoom,
+        });
+      } catch (e) {
+        // ignore
+      }
     }
-  }, [markers, mapInstance, isLoaded, onMarkerClick]);
+  }, [markers, mapInstance, isLoaded, onMarkerClick, autoFitMarkers, autoCenterSingleMarker, singleMarkerZoom, zoom]);
 
   // Update polyline when it changes
   useEffect(() => {
