@@ -40,12 +40,93 @@ export default function CarrierDashboard() {
   const [availableDriversCount, setAvailableDriversCount] = useState(0);
   const [vehicleCounts, setVehicleCounts] = useState(null); // aggregated across associated drivers
   
-  const [activeNav, setActiveNav] = useState('home');
+  const [activeNav, setActiveNav] = useState(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem('fp_carrier_preferences') || '{}') || {};
+      const dv = String(stored.defaultView || '').trim();
+      if (dv === 'Analytics') return 'analytics';
+      if (dv === 'My Loads Default View') return 'my-loads';
+      if (dv === 'Dashboard Overview') return 'home';
+      return 'home';
+    } catch {
+      return 'home';
+    }
+  });
   const [initialThreadId, setInitialThreadId] = useState(null);
   const [activeMarketplaceSection, setActiveMarketplaceSection] = useState('loads');
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isSidebarDark, setIsSidebarDark] = useState(false);
+  const [themePreference, setThemePreference] = useState(() => {
+    try {
+      const v = String(localStorage.getItem('fp_theme_preference') || '').trim().toLowerCase();
+      return v === 'light' || v === 'dark' || v === 'device' ? v : 'device';
+    } catch {
+      return 'device';
+    }
+  });
   const [isDarkMode, setIsDarkMode] = useState(false);
+
+  // Apply theme preference (light/dark/device) to dashboard.
+  useEffect(() => {
+    let mediaQuery = null;
+    let onChange = null;
+
+    const apply = () => {
+      if (themePreference === 'dark') {
+        setIsDarkMode(true);
+        return;
+      }
+      if (themePreference === 'light') {
+        setIsDarkMode(false);
+        return;
+      }
+      // device
+      try {
+        mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+        setIsDarkMode(Boolean(mediaQuery.matches));
+        onChange = (e) => setIsDarkMode(Boolean(e.matches));
+        if (typeof mediaQuery.addEventListener === 'function') {
+          mediaQuery.addEventListener('change', onChange);
+        } else if (typeof mediaQuery.addListener === 'function') {
+          mediaQuery.addListener(onChange);
+        }
+      } catch {
+        setIsDarkMode(false);
+      }
+    };
+
+    apply();
+
+    return () => {
+      if (!mediaQuery || !onChange) return;
+      try {
+        if (typeof mediaQuery.removeEventListener === 'function') {
+          mediaQuery.removeEventListener('change', onChange);
+        } else if (typeof mediaQuery.removeListener === 'function') {
+          mediaQuery.removeListener(onChange);
+        }
+      } catch {
+        // ignore
+      }
+    };
+  }, [themePreference]);
+
+  // Receive theme preference changes from Settings (same-tab custom event).
+  useEffect(() => {
+    const handler = (e) => {
+      const pref = String(e?.detail?.preference || '').trim().toLowerCase();
+      const next = pref === 'light' || pref === 'dark' || pref === 'device' ? pref : 'device';
+      setThemePreference(next);
+      try {
+        localStorage.setItem('fp_theme_preference', next);
+      } catch {
+        // ignore
+      }
+    };
+
+    window.addEventListener('fp-theme-preference', handler);
+    return () => window.removeEventListener('fp-theme-preference', handler);
+  }, []);
 
   // Messaging unread badge
   const [messagingUnread, setMessagingUnread] = useState(0);
@@ -1280,7 +1361,15 @@ export default function CarrierDashboard() {
             className="dark-toggle"
             aria-pressed={isDarkMode}
             aria-label="Toggle dark mode"
-            onClick={() => setIsDarkMode((s) => !s)}
+            onClick={() => {
+              const nextPref = isDarkMode ? 'light' : 'dark';
+              setThemePreference(nextPref);
+              try {
+                localStorage.setItem('fp_theme_preference', nextPref);
+              } catch {
+                // ignore
+              }
+            }}
           >
             <span className="dark-toggle-knob" />
           </button>

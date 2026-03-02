@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
 from .auth import get_current_user
-from .database import bucket, db
+from .database import bucket, db, signed_download_url
 from .load_ownership import normalize_payer_fields
 from .settings import settings
 
@@ -153,14 +153,34 @@ def _can_access_load_documents(load: Dict[str, Any], uid: str, role: str) -> boo
     if role in {"admin", "super_admin"}:
         return True
 
-    if role in {"shipper", "broker"} and str(load.get("created_by") or "").strip() == uid:
-        return True
+    if role in {"shipper", "broker"}:
+        owner_uid = load.get("created_by") or load.get("payer_uid") or load.get("createdBy")
+        if str(owner_uid or "").strip() == str(uid or "").strip():
+            return True
 
-    assigned_carrier = str(load.get("assigned_carrier") or load.get("assigned_carrier_id") or "").strip()
+        try:
+            payer_uid, _payer_role = normalize_payer_fields(load)
+            if str(payer_uid or "").strip() == str(uid or "").strip():
+                return True
+        except Exception:
+            pass
+
+    assigned_carrier = str(
+        load.get("assigned_carrier")
+        or load.get("assigned_carrier_id")
+        or load.get("carrier_id")
+        or load.get("carrier_uid")
+        or ""
+    ).strip()
     if role == "carrier" and assigned_carrier and assigned_carrier == uid:
         return True
 
-    assigned_driver = str(load.get("assigned_driver") or load.get("assigned_driver_id") or "").strip()
+    assigned_driver = str(
+        load.get("assigned_driver")
+        or load.get("assigned_driver_id")
+        or load.get("driver_id")
+        or ""
+    ).strip()
     if role == "driver" and assigned_driver and assigned_driver == uid:
         return True
 
@@ -264,8 +284,7 @@ def upload_load_document_bytes(
     try:
         blob = bucket.blob(storage_path)
         blob.upload_from_string(data, content_type=content_type)
-        blob.make_public()
-        url = getattr(blob, "public_url", None)
+        url = signed_download_url(storage_path, filename=filename, disposition="attachment")
     except Exception:
         url = None
 
@@ -307,6 +326,7 @@ def generate_rate_confirmation_pdf_bytes(*, load: Dict[str, Any], accepted_offer
     load_number = str(load.get("load_number") or "").strip()
     origin = load.get("origin")
     destination = load.get("destination")
+    private_details = load.get("private_details") if isinstance(load.get("private_details"), dict) else {}
 
     def _loc_text(v: Any) -> str:
         if isinstance(v, str):
@@ -319,64 +339,199 @@ def generate_rate_confirmation_pdf_bytes(*, load: Dict[str, Any], accepted_offer
             return combo or text or str(v)
         return str(v or "")
 
-    lines: List[str] = []
-    lines.append("RATE CONFIRMATION")
-    lines.append("")
-    lines.append(f"Load Number: {load_number or '—'}")
-    lines.append(f"Load ID: {load_id or '—'}")
-    lines.append("")
-    lines.append(f"Shipper: {(shipper.get('company_name') or shipper.get('name') or shipper.get('email') or shipper.get('uid') or '—')}")
-    if shipper.get("email"):
-        lines.append(f"Shipper Email: {shipper.get('email')}")
-    lines.append("")
+    def _first_str(*vals: Any) -> str:
+        for v in vals:
+            s = str(v or "").strip()
+            if s:
+                return s
+        return ""
 
-    if accepted_offer:
-        rate = accepted_offer.get("rate")
-        carrier_name = accepted_offer.get("carrier_name")
-        carrier_id = accepted_offer.get("carrier_id")
-        if carrier_name or carrier_id:
-            lines.append(f"Carrier: {carrier_name or carrier_id}")
-        if rate is not None:
-            lines.append(f"Rate: ${float(rate):,.2f}")
-        if accepted_offer.get("notes"):
-            lines.append(f"Notes: {accepted_offer.get('notes')}")
-        lines.append("")
+    def _money(v: Any) -> str:
+        try:
+            if v is None:
+                return "—"
+            return f"${float(v):,.2f}"
+        except Exception:
+            return "—"
 
-    lines.append(f"Origin: {_loc_text(origin) or '—'}")
-    lines.append(f"Destination: {_loc_text(destination) or '—'}")
+    def _kv(label: str, value: str) -> str:
+        return f"{label}: {value or '—'}"
 
-    for key, label in [
-        ("pickup_date", "Pickup Date"),
-        ("delivery_date", "Delivery Date"),
-        ("pickup_time", "Pickup Time"),
-        ("delivery_time", "Delivery Time"),
-    ]:
-        if load.get(key):
-            lines.append(f"{label}: {load.get(key)}")
+    shipper_name = _first_str(
+        load.get("shipper_company_name"),
+        shipper.get("company_name"),
+        shipper.get("name"),
+        shipper.get("email"),
+        shipper.get("uid"),
+    )
+    shipper_email = _first_str(load.get("shipper_email"), shipper.get("email"))
+    shipper_phone = _first_str(load.get("shipper_phone"), private_details.get("shipper_contact_phone"))
+
+    carrier_name = ""
+    carrier_id = ""
+    carrier_rate = None
+    carrier_notes = ""
+    if isinstance(accepted_offer, dict):
+        carrier_name = _first_str(accepted_offer.get("carrier_name"))
+        carrier_id = _first_str(accepted_offer.get("carrier_id"))
+        carrier_rate = accepted_offer.get("rate")
+        carrier_notes = _first_str(accepted_offer.get("notes"))
+
+    carrier_name = _first_str(load.get("assigned_carrier_name"), carrier_name, load.get("carrier_name"))
+    carrier_id = _first_str(load.get("assigned_carrier"), load.get("assigned_carrier_id"), load.get("carrier_id"), carrier_id)
+    mc_number = _first_str(load.get("carrier_mc"), load.get("mc_number"), load.get("carrier_mc_number"))
+    dot_number = _first_str(load.get("carrier_dot"), load.get("dot_number"), load.get("carrier_dot_number"))
+
+    pickup_date = _first_str(load.get("pickup_date"), load.get("pickupDate"))
+    delivery_date = _first_str(load.get("delivery_date"), load.get("deliveryDate"))
+    pickup_time = _first_str(load.get("pickup_time"))
+    delivery_time = _first_str(load.get("delivery_time"))
+    equipment = _first_str(load.get("equipment_type"), load.get("equipmentType"), load.get("equipment"))
+    commodity = _first_str(load.get("commodity"), load.get("product"), load.get("freight_description"))
+    weight = _first_str(load.get("weight"), load.get("weight_lbs"), load.get("weightLbs"))
+
+    origin_text = _first_str(_loc_text(origin), _loc_text(private_details.get("pickup_exact_address")))
+    destination_text = _first_str(_loc_text(destination), _loc_text(private_details.get("receiver_exact_address")))
+
+    refs = load.get("reference_numbers") if isinstance(load.get("reference_numbers"), dict) else {}
+    po_number = _first_str(load.get("po_number"), refs.get("po"), refs.get("po_number"))
+    ref_number = _first_str(load.get("reference"), refs.get("ref"), refs.get("reference"))
+
+    payment_terms = _first_str(load.get("payment_terms"), load.get("terms"), "Net 14")
+    special_instructions = _first_str(load.get("special_instructions"), private_details.get("special_instructions"), private_details.get("receiver_handling_instructions"))
 
     doc = fitz.open()
     page = doc.new_page(width=612, height=792)  # Letter
 
-    y = 72
-    for i, line in enumerate(lines):
-        size = 16 if i == 0 else 11
-        page.insert_text((72, y), line, fontsize=size)
-        y += 22 if i == 0 else 16
+    margin = 48
+    width = 612 - 2 * margin
+    y = 44
+
+    # Header
+    page.insert_text((margin, y), "RATE CONFIRMATION", fontsize=18)
+    y += 18
+    page.insert_text((margin, y), f"Load {load_number or '—'}   •   Load ID {load_id or '—'}", fontsize=10)
+    y += 18
+    page.draw_line((margin, y), (margin + width, y))
+    y += 14
+
+    def section_title(title: str) -> None:
+        nonlocal y
+        page.insert_text((margin, y), title, fontsize=12)
+        y += 12
+
+    def two_col(left_lines: List[str], right_lines: List[str]) -> None:
+        nonlocal y
+        box_h = max(70, 14 * max(len(left_lines), len(right_lines)) + 14)
+        box_y = y
+        page.draw_rect(fitz.Rect(margin, box_y, margin + width, box_y + box_h), color=(0.82, 0.82, 0.82), width=1)
+        mid_x = margin + width / 2
+        page.draw_line((mid_x, box_y), (mid_x, box_y + box_h))
+
+        lx = margin + 10
+        rx = mid_x + 10
+        ly = box_y + 12
+        for line in left_lines:
+            page.insert_text((lx, ly), line, fontsize=10)
+            ly += 14
+        ry = box_y + 12
+        for line in right_lines:
+            page.insert_text((rx, ry), line, fontsize=10)
+            ry += 14
+
+        y = box_y + box_h + 14
+
+    section_title("Parties")
+    two_col(
+        [
+            _kv("Shipper", shipper_name),
+            _kv("Email", shipper_email),
+            _kv("Phone", shipper_phone),
+        ],
+        [
+            _kv("Carrier", carrier_name or carrier_id),
+            _kv("MC", mc_number),
+            _kv("DOT", dot_number),
+        ],
+    )
+
+    section_title("Shipment")
+    shipment_left = [
+        _kv("Origin", origin_text),
+        _kv("Pickup Date", pickup_date),
+        _kv("Pickup Time", pickup_time),
+    ]
+    shipment_right = [
+        _kv("Destination", destination_text),
+        _kv("Delivery Date", delivery_date),
+        _kv("Delivery Time", delivery_time),
+    ]
+    two_col(shipment_left, shipment_right)
+
+    section_title("Freight Details")
+    two_col(
+        [
+            _kv("Equipment", equipment),
+            _kv("Commodity", commodity),
+            _kv("Weight", str(weight) if str(weight or "").strip() else "—"),
+        ],
+        [
+            _kv("PO", po_number),
+            _kv("Reference", ref_number),
+        ],
+    )
+
+    section_title("Pricing & Terms")
+    total = carrier_rate
+    two_col(
+        [
+            _kv("Agreed Rate", _money(carrier_rate)),
+            _kv("Total", _money(total)),
+        ],
+        [
+            _kv("Payment Terms", payment_terms),
+            _kv("Carrier Notes", carrier_notes),
+        ],
+    )
+
+    if special_instructions:
+        section_title("Instructions")
+        box_h = 72
+        box_y = y
+        page.draw_rect(fitz.Rect(margin, box_y, margin + width, box_y + box_h), color=(0.82, 0.82, 0.82), width=1)
+        page.insert_textbox(
+            fitz.Rect(margin + 10, box_y + 10, margin + width - 10, box_y + box_h - 10),
+            str(special_instructions),
+            fontsize=10,
+        )
+        y = box_y + box_h + 14
+
+    section_title("Signatures")
+    sig_box_h = 110
+    sig_box_y = y
+    page.draw_rect(fitz.Rect(margin, sig_box_y, margin + width, sig_box_y + sig_box_h), color=(0.82, 0.82, 0.82), width=1)
+    page.insert_text((margin + 10, sig_box_y + 14), "Shipper Authorized Signature", fontsize=10)
+    page.insert_text((margin + 10, sig_box_y + 62), "Carrier Authorized Signature", fontsize=10)
+    page.draw_line((margin + 200, sig_box_y + 30), (margin + width - 10, sig_box_y + 30))
+    page.draw_line((margin + 200, sig_box_y + 78), (margin + width - 10, sig_box_y + 78))
+    page.insert_text((margin + 10, sig_box_y + sig_box_h - 14), "This Rate Confirmation is binding upon electronic acceptance in FreightPower.", fontsize=9)
+    y = sig_box_y + sig_box_h + 10
 
     out = doc.tobytes()
     doc.close()
     return out
 
 
-def ensure_rate_confirmation_document(*, load_id: str, shipper: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def ensure_rate_confirmation_document(*, load_id: str, shipper: Dict[str, Any], force_regenerate: bool = False) -> Optional[Dict[str, Any]]:
     load = _get_load(load_id)
     if not load:
         return None
 
     # Don't create duplicates.
-    for d in list_load_documents(load_id):
-        if str(d.get("kind") or "").strip().upper() == "RATE_CONFIRMATION":
-            return d
+    if not force_regenerate:
+        for d in list_load_documents(load_id):
+            if str(d.get("kind") or "").strip().upper() == "RATE_CONFIRMATION":
+                return d
 
     accepted_offer = None
     offers = load.get("offers")
@@ -401,6 +556,14 @@ async def get_load_documents(load_id: str, user: Dict[str, Any] = Depends(get_cu
         raise HTTPException(status_code=403, detail="Not authorized to view load documents")
 
     docs = list_load_documents(load_id)
+    # Replace stored URLs with short-lived signed URLs (when storage_path is available).
+    try:
+        for d in docs:
+            sp = str(d.get("storage_path") or "").strip()
+            if sp:
+                d["url"] = signed_download_url(sp, filename=d.get("filename"), disposition="attachment")
+    except Exception:
+        pass
     return {"load_id": load_id, "total": len(docs), "documents": docs}
 
 

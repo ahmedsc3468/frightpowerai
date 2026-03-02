@@ -37,8 +37,10 @@ export default function MyCarrier() {
   const [podLoad, setPodLoad] = useState(null);
   const [podReceiverName, setPodReceiverName] = useState('');
   const [podSignerName, setPodSignerName] = useState('');
-  const [podSignMethod, setPodSignMethod] = useState('typed'); // typed | image
+  const [podSignMethod, setPodSignMethod] = useState('typed'); // draw | typed | image
   const [podSignatureImageUrl, setPodSignatureImageUrl] = useState('');
+  const [podHasSignature, setPodHasSignature] = useState(false);
+  const [podSignatureDataUrl, setPodSignatureDataUrl] = useState('');
   const [podChecks, setPodChecks] = useState({
     gpsOk: false,
     timeOk: false,
@@ -49,7 +51,21 @@ export default function MyCarrier() {
   const [podDistanceMeters, setPodDistanceMeters] = useState(null);
   const [podDestinationCoords, setPodDestinationCoords] = useState({ lat: null, lng: null, label: '' });
 
+  const [showPickupModal, setShowPickupModal] = useState(false);
+  const [pickupSubmitting, setPickupSubmitting] = useState(false);
+  const [pickupError, setPickupError] = useState('');
+  const [pickupLoad, setPickupLoad] = useState(null);
+  const [pickupShipperName, setPickupShipperName] = useState('');
+  const [pickupRemarks, setPickupRemarks] = useState('');
+  const [pickupBolFile, setPickupBolFile] = useState(null);
+  const [pickupGps, setPickupGps] = useState({ lat: null, lng: null, accuracy: null, timestamp: null });
+  const [pickupHasSignature, setPickupHasSignature] = useState(false);
+
   const podIframeRef = useRef(null);
+  const podCanvasRef = useRef(null);
+  const podDrawRef = useRef({ drawing: false, lastX: 0, lastY: 0 });
+  const pickupCanvasRef = useRef(null);
+  const pickupDrawRef = useRef({ drawing: false, lastX: 0, lastY: 0 });
 
   // Compliance + consents
   const [complianceLoading, setComplianceLoading] = useState(false);
@@ -610,29 +626,184 @@ export default function MyCarrier() {
     }
   };
 
-  const startTrip = async (load) => {
-    const loadId = getLoadId(load);
-    if (!loadId) {
-      alert(tr('myCarrier.error.loadIdNotFound', 'Load ID not found'));
+  const refreshPickupGps = async () => {
+    setPickupError('');
+    if (!navigator?.geolocation) {
+      setPickupError(tr('myCarrier.pickup.error.geoNotSupported', 'Geolocation is not supported in this browser.'));
       return;
     }
+    await new Promise((resolve) => {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          const lat = pos?.coords?.latitude;
+          const lng = pos?.coords?.longitude;
+          const accuracy = pos?.coords?.accuracy;
+          const ts = pos?.timestamp || Date.now();
+          setPickupGps({ lat, lng, accuracy, timestamp: ts });
+          resolve(true);
+        },
+        (err) => {
+          setPickupError(err?.message || tr('myCarrier.pickup.error.getLocationFailed', 'Could not get current location.'));
+          resolve(false);
+        },
+        { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
+      );
+    });
+  };
+
+  const openPickupForLoad = async (load) => {
+    setPickupError('');
+    setPickupSubmitting(false);
+    setPickupLoad(load);
+    setPickupBolFile(null);
+    setPickupGps({ lat: null, lng: null, accuracy: null, timestamp: null });
+    setPickupHasSignature(false);
+    setPickupRemarks('');
+    const defaultName = String(load?.shipper_company_name || load?.shipper_name || '').trim();
+    setPickupShipperName(defaultName);
+    setShowPickupModal(true);
+  };
+
+  const clearPickupSignature = () => {
+    const canvas = pickupCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    setPickupHasSignature(false);
+  };
+
+  useEffect(() => {
+    if (!showPickupModal) return;
+    const canvas = pickupCanvasRef.current;
+    if (!canvas) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const cssW = 520;
+    const cssH = 160;
+    canvas.style.width = `${cssW}px`;
+    canvas.style.height = `${cssH}px`;
+    canvas.width = Math.floor(cssW * dpr);
+    canvas.height = Math.floor(cssH * dpr);
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = '#111827';
+    ctx.clearRect(0, 0, cssW, cssH);
+  }, [showPickupModal]);
+
+  const pickupPointerDown = (e) => {
+    const canvas = pickupCanvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX ?? 0) - rect.left;
+    const y = (e.clientY ?? 0) - rect.top;
+    pickupDrawRef.current = { drawing: true, lastX: x, lastY: y };
+  };
+
+  const pickupPointerMove = (e) => {
+    const canvas = pickupCanvasRef.current;
+    if (!canvas) return;
+    if (!pickupDrawRef.current.drawing) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX ?? 0) - rect.left;
+    const y = (e.clientY ?? 0) - rect.top;
+    const ctx = canvas.getContext('2d');
+    ctx.beginPath();
+    ctx.moveTo(pickupDrawRef.current.lastX, pickupDrawRef.current.lastY);
+    ctx.lineTo(x, y);
+    ctx.stroke();
+    pickupDrawRef.current.lastX = x;
+    pickupDrawRef.current.lastY = y;
+    setPickupHasSignature(true);
+  };
+
+  const pickupPointerUp = () => {
+    pickupDrawRef.current.drawing = false;
+  };
+
+  const submitPickup = async () => {
+    if (!pickupLoad) return;
+    const loadId = getLoadId(pickupLoad);
+    if (!loadId) {
+      setPickupError(tr('myCarrier.error.loadIdNotFoundDot', 'Load ID not found.'));
+      return;
+    }
+
+    if (!pickupBolFile) {
+      setPickupError(tr('myCarrier.pickup.error.bolRequired', 'BOL is required before completing pickup.'));
+      return;
+    }
+
+    const shipperName = String(pickupShipperName || '').trim();
+    if (!shipperName) {
+      setPickupError(tr('myCarrier.pickup.error.shipperNameRequired', 'Shipper/warehouse name is required.'));
+      return;
+    }
+
+    if (pickupGps?.lat == null || pickupGps?.lng == null) {
+      setPickupError(tr('myCarrier.pickup.error.gpsRequired', 'GPS location is required to complete pickup.'));
+      return;
+    }
+
+    if (!pickupHasSignature) {
+      setPickupError(tr('myCarrier.pickup.error.signatureRequired', 'Pickup signature is required.'));
+      return;
+    }
+
+    setPickupSubmitting(true);
+    setPickupError('');
     try {
       const token = await getAuthToken();
-      const response = await fetch(`${API_URL}/loads/${loadId}/driver-update-status`, {
+
+      // Upload BOL (required by workflow).
+      const form = new FormData();
+      form.append('file', pickupBolFile);
+      form.append('kind', 'BOL');
+      const uploadRes = await fetch(`${API_URL}/loads/${loadId}/documents/upload`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` },
+        body: form,
+      });
+      const uploadData = await uploadRes.json().catch(() => ({}));
+      if (!uploadRes.ok) throw new Error(uploadData?.detail || tr('myCarrier.pickup.error.bolUploadFailed', 'Failed to upload BOL'));
+
+      const canvas = pickupCanvasRef.current;
+      const signatureDataUrl = canvas ? canvas.toDataURL('image/png') : '';
+      if (!signatureDataUrl) {
+        throw new Error(tr('myCarrier.pickup.error.signatureRequired', 'Pickup signature is required.'));
+      }
+
+      const res = await fetch(`${API_URL}/loads/${loadId}/pickup/complete`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ new_status: 'in_transit' })
+        body: JSON.stringify({
+          latitude: pickupGps.lat,
+          longitude: pickupGps.lng,
+          shipper_name: shipperName,
+          shipper_signature_data_url: signatureDataUrl,
+          remarks: String(pickupRemarks || '').trim() || undefined,
+        }),
       });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(data?.detail || tr('myCarrier.error.startTripFailed', 'Failed to start trip'));
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.detail || tr('myCarrier.pickup.error.completeFailed', 'Failed to complete pickup'));
+
+      setShowPickupModal(false);
       await fetchLoads();
+      alert(tr('myCarrier.pickup.success', 'Pickup completed. Trip started.'));
     } catch (e) {
-      console.error('Start trip error:', e);
-      alert(e?.message || tr('myCarrier.error.startTripFailed', 'Failed to start trip'));
+      console.error('Pickup error:', e);
+      setPickupError(e?.message || tr('myCarrier.pickup.error.completeFailed', 'Failed to complete pickup'));
+    } finally {
+      setPickupSubmitting(false);
     }
+  };
+
+  const startTrip = async (load) => {
+    await openPickupForLoad(load);
   };
 
   const openPodForLoad = async (load) => {
@@ -640,8 +811,10 @@ export default function MyCarrier() {
     setPodSubmitting(false);
     setPodLoad(load);
     setPodReceiverName('');
-    setPodSignMethod('typed');
+    setPodSignMethod('draw');
     setPodSignatureImageUrl('');
+    setPodHasSignature(false);
+    setPodSignatureDataUrl('');
     setPodChecks({ gpsOk: false, timeOk: false, confirmAccurate: false, confirmDelivered: false });
     setPodGps({ lat: null, lng: null, accuracy: null, timestamp: null });
     setPodDistanceMeters(null);
@@ -739,6 +912,16 @@ export default function MyCarrier() {
     };
   }, [podSignatureImageUrl]);
 
+  useEffect(() => {
+    if (!showPodModal) return;
+    try {
+      requestAnimationFrame(() => initPodSignatureCanvas());
+    } catch {
+      initPodSignatureCanvas();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showPodModal]);
+
   const loadSignatureImage = async () => {
     setPodError('');
     try {
@@ -756,6 +939,67 @@ export default function MyCarrier() {
     } catch (e) {
       console.error('Load signature image error:', e);
       setPodError(e?.message || tr('myCarrier.pod.error.signatureLoadFailed', 'Could not load signature image.'));
+    }
+  };
+
+  const initPodSignatureCanvas = () => {
+    const canvas = podCanvasRef.current;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const cssW = 300;
+    const cssH = 140;
+    canvas.style.width = `${cssW}px`;
+    canvas.style.height = `${cssH}px`;
+    canvas.width = Math.floor(cssW * dpr);
+    canvas.height = Math.floor(cssH * dpr);
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = theme.text;
+    ctx.clearRect(0, 0, cssW, cssH);
+    setPodHasSignature(false);
+    setPodSignatureDataUrl('');
+  };
+
+  const clearPodSignature = () => {
+    initPodSignatureCanvas();
+  };
+
+  const podSigPointerDown = (e) => {
+    const canvas = podCanvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX ?? 0) - rect.left;
+    const y = (e.clientY ?? 0) - rect.top;
+    podDrawRef.current = { drawing: true, lastX: x, lastY: y };
+  };
+
+  const podSigPointerMove = (e) => {
+    const canvas = podCanvasRef.current;
+    if (!canvas) return;
+    if (!podDrawRef.current.drawing) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX ?? 0) - rect.left;
+    const y = (e.clientY ?? 0) - rect.top;
+    const ctx = canvas.getContext('2d');
+    ctx.beginPath();
+    ctx.moveTo(podDrawRef.current.lastX, podDrawRef.current.lastY);
+    ctx.lineTo(x, y);
+    ctx.stroke();
+    podDrawRef.current.lastX = x;
+    podDrawRef.current.lastY = y;
+    setPodHasSignature(true);
+  };
+
+  const podSigPointerUp = () => {
+    podDrawRef.current.drawing = false;
+    const canvas = podCanvasRef.current;
+    if (!canvas) return;
+    try {
+      setPodSignatureDataUrl(canvas.toDataURL('image/png'));
+    } catch {
+      // ignore
     }
   };
 
@@ -794,18 +1038,24 @@ export default function MyCarrier() {
     const podLabelSignerName = tr('myCarrier.pod.label.signerName', 'Signer Name');
     const podLabelSignatureImage = tr('myCarrier.pod.label.signatureImage', 'Signature (image)');
     const podLabelSignatureTyped = tr('myCarrier.pod.label.signatureTyped', 'Signature (typed)');
+    const podLabelSignatureDrawn = tr('myCarrier.pod.label.signatureDrawn', 'Signature (drawn)');
     const podSignatureAlt = tr('myCarrier.pod.label.signatureAlt', 'Signature');
     const podSignatureImageMissing = tr('myCarrier.pod.signatureImageMissing', 'Signature image not available');
+    const podSignatureDrawnMissing = tr('myCarrier.pod.signatureDrawnMissing', 'Drawn signature not captured');
     const podFootnote = tr(
       'myCarrier.pod.footnote',
       'This is a digitally signed commercial document. False statements or misrepresentation may be subject to penalties under applicable law and contract terms.'
     );
 
-    const signatureBlock = podSignMethod === 'image'
-      ? (podSignatureImageUrl
-          ? `<div class="sig-row"><div class="sig-label">${podLabelSignatureImage}</div><div class="sig-box"><img class="sig-img" src="${podSignatureImageUrl}" alt="${podSignatureAlt}" /></div></div>`
-          : `<div class="sig-row"><div class="sig-label">${podLabelSignatureImage}</div><div class="sig-box sig-missing">${podSignatureImageMissing}</div></div>`)
-      : `<div class="sig-row"><div class="sig-label">${podLabelSignatureTyped}</div><div class="sig-box"><div class="sig-typed">${signedName}</div></div></div>`;
+    const signatureBlock = podSignMethod === 'draw'
+      ? (podSignatureDataUrl
+          ? `<div class="sig-row"><div class="sig-label">${podLabelSignatureDrawn}</div><div class="sig-box"><img class="sig-img" src="${podSignatureDataUrl}" alt="${podSignatureAlt}" /></div></div>`
+          : `<div class="sig-row"><div class="sig-label">${podLabelSignatureDrawn}</div><div class="sig-box sig-missing">${podSignatureDrawnMissing}</div></div>`)
+      : (podSignMethod === 'image'
+          ? (podSignatureImageUrl
+              ? `<div class="sig-row"><div class="sig-label">${podLabelSignatureImage}</div><div class="sig-box"><img class="sig-img" src="${podSignatureImageUrl}" alt="${podSignatureAlt}" /></div></div>`
+              : `<div class="sig-row"><div class="sig-label">${podLabelSignatureImage}</div><div class="sig-box sig-missing">${podSignatureImageMissing}</div></div>`)
+          : `<div class="sig-row"><div class="sig-label">${podLabelSignatureTyped}</div><div class="sig-box"><div class="sig-typed">${signedName}</div></div></div>`);
 
     return `<!doctype html>
 <html>
@@ -923,8 +1173,12 @@ export default function MyCarrier() {
       return;
     }
 
+    if (podSignMethod === 'draw' && !podHasSignature) {
+      setPodError(tr('myCarrier.pod.error.signatureRequired', 'Signature is required.'));
+      return;
+    }
     if (podSignMethod === 'image' && !podSignatureImageUrl) {
-      setPodError(tr('myCarrier.pod.error.signatureNotLoaded', 'Signature image not loaded. Click “Load Signature Image”, or switch to Typed.'));
+      setPodError(tr('myCarrier.pod.error.signatureNotLoaded', 'Signature image not loaded. Click “Load Signature Image”, or switch to Typed/Draw.'));
       return;
     }
 
@@ -946,6 +1200,53 @@ export default function MyCarrier() {
     try {
       const token = await getAuthToken();
 
+      if (podGps?.lat == null || podGps?.lng == null) {
+        throw new Error(tr('myCarrier.pod.error.gpsRequired', 'GPS location is required. Click “Get Current Location”.'));
+      }
+
+      const blobToDataUrl = (blob) => {
+        return new Promise((resolve, reject) => {
+          try {
+            const reader = new FileReader();
+            reader.onloadend = () => resolve(String(reader.result || ''));
+            reader.onerror = () => reject(new Error('Failed to read signature image'));
+            reader.readAsDataURL(blob);
+          } catch (e) {
+            reject(e);
+          }
+        });
+      };
+
+      const typedSignatureToDataUrl = (text) => {
+        const c = document.createElement('canvas');
+        const w = 520;
+        const h = 160;
+        c.width = w;
+        c.height = h;
+        const ctx = c.getContext('2d');
+        ctx.clearRect(0, 0, w, h);
+        ctx.fillStyle = '#111827';
+        ctx.font = '48px "Times New Roman", serif';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(text || '').slice(0, 60), 18, h / 2);
+        return c.toDataURL('image/png');
+      };
+
+      let receiverSignatureDataUrl = '';
+      if (podSignMethod === 'draw') {
+        const canvas = podCanvasRef.current;
+        receiverSignatureDataUrl = canvas ? canvas.toDataURL('image/png') : String(podSignatureDataUrl || '');
+      } else if (podSignMethod === 'image') {
+        const sigBlob = await fetch(podSignatureImageUrl).then(r => r.blob());
+        receiverSignatureDataUrl = await blobToDataUrl(sigBlob);
+      } else {
+        receiverSignatureDataUrl = typedSignatureToDataUrl(signer);
+      }
+
+      if (!receiverSignatureDataUrl || receiverSignatureDataUrl.length < 20) {
+        throw new Error(tr('myCarrier.pod.error.signatureRequired', 'Signature is required.'));
+      }
+
       const doc = await buildPodPdfFromIframe();
       const blob = doc.output('blob');
       const filenameSafe = String(podLoad?.load_number || loadId).replace(/[^a-z0-9._-]/gi, '_');
@@ -962,25 +1263,27 @@ export default function MyCarrier() {
       const uploadData = await uploadRes.json().catch(() => ({}));
       if (!uploadRes.ok) throw new Error(uploadData?.detail || tr('myCarrier.pod.error.uploadFailed', 'Failed to upload POD'));
 
-      const statusRes = await fetch(`${API_URL}/loads/${loadId}/driver-update-status`, {
+      const deliveryRes = await fetch(`${API_URL}/loads/${loadId}/delivery/complete`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          new_status: 'delivered',
-          latitude: podGps?.lat ?? null,
-          longitude: podGps?.lng ?? null,
-          notes: `POD uploaded (receiver: ${receiver}, sign_method: ${podSignMethod})`
+          latitude: podGps.lat,
+          longitude: podGps.lng,
+          receiver_name: receiver,
+          receiver_signature_data_url: receiverSignatureDataUrl,
+          remarks: `POD uploaded (receiver: ${receiver}, signer: ${signer}, sign_method: ${podSignMethod})`,
+          delivered_at: Date.now() / 1000,
         })
       });
-      const statusData = await statusRes.json().catch(() => ({}));
-      if (!statusRes.ok) throw new Error(statusData?.detail || tr('myCarrier.pod.error.markDeliveredFailed', 'Failed to mark load as delivered'));
+      const deliveryData = await deliveryRes.json().catch(() => ({}));
+      if (!deliveryRes.ok) throw new Error(deliveryData?.detail || tr('myCarrier.pod.error.markDeliveredFailed', 'Failed to complete delivery'));
 
       setShowPodModal(false);
       await fetchLoads();
-      alert(tr('myCarrier.pod.success.uploadedAndDelivered', 'POD uploaded and load marked as delivered.'));
+      alert(tr('myCarrier.pod.success.uploadedAndDelivered', 'POD uploaded and delivery completed.'));
     } catch (e) {
       console.error('Submit POD error:', e);
       setPodError(e?.message || tr('myCarrier.pod.error.submitFailed', 'Failed to submit POD'));
@@ -1835,6 +2138,143 @@ export default function MyCarrier() {
             </div>
           )}
 
+          {/* Complete Pickup Modal (BOL + signature) */}
+          {showPickupModal && (
+            <div
+              style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1250 }}
+              onClick={() => setShowPickupModal(false)}
+            >
+              <div
+                style={{ background: theme.surface, borderRadius: 12, padding: 22, maxWidth: 980, width: '94%', maxHeight: '86vh', overflow: 'auto', border: `1px solid ${theme.border}` }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'center', marginBottom: 12 }}>
+                  <div>
+                    <h3 style={{ margin: 0, color: theme.text }}>{tr('myCarrier.pickup.modal.title', 'Complete Pickup')}</h3>
+                    <div style={{ color: theme.muted, fontSize: 13 }}>
+                      {tr('myCarrier.labels.loadNumber', 'Load #')} {pickupLoad ? (pickupLoad.load_number || getLoadId(pickupLoad) || '—') : '—'}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setShowPickupModal(false)}
+                    style={{ border: `1px solid ${theme.border}`, background: theme.surfaceAlt, color: theme.text, borderRadius: 8, padding: '8px 12px', cursor: 'pointer' }}
+                  >
+                    {tr('common.close', 'Close')}
+                  </button>
+                </div>
+
+                {pickupError && (
+                  <div style={{ color: theme.danger, marginBottom: 12 }}>{pickupError}</div>
+                )}
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 14 }}>
+                  <div style={{ border: `1px solid ${theme.border}`, background: theme.surfaceAlt, borderRadius: 12, padding: 14 }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                      <div>
+                        <label style={{ display: 'block', fontWeight: 650, color: theme.text, marginBottom: 6 }}>
+                          {tr('myCarrier.pickup.shipperName', 'Shipper / Warehouse Name')} *
+                        </label>
+                        <input
+                          value={pickupShipperName}
+                          onChange={(e) => setPickupShipperName(e.target.value)}
+                          placeholder={tr('myCarrier.pickup.shipperPlaceholder', 'Name on pickup receipt')}
+                          style={{ width: '100%', padding: '10px 12px', borderRadius: 10, border: `1px solid ${theme.border}`, background: theme.surface, color: theme.text }}
+                        />
+                      </div>
+                      <div>
+                        <label style={{ display: 'block', fontWeight: 650, color: theme.text, marginBottom: 6 }}>
+                          {tr('myCarrier.pickup.bol', 'Bill of Lading (BOL)')} *
+                        </label>
+                        <input
+                          type="file"
+                          accept="application/pdf,image/*"
+                          onChange={(e) => setPickupBolFile(e.target.files?.[0] || null)}
+                          style={{ width: '100%', padding: '10px 12px', borderRadius: 10, border: `1px solid ${theme.border}`, background: theme.surface, color: theme.text }}
+                          disabled={pickupSubmitting}
+                        />
+                        <div style={{ marginTop: 6, color: theme.muted, fontSize: 12 }}>
+                          {pickupBolFile ? `${tr('myCarrier.pickup.selected', 'Selected')}: ${pickupBolFile.name}` : tr('myCarrier.pickup.bolHint', 'Upload the signed BOL at pickup before starting the trip.')}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div style={{ marginTop: 12 }}>
+                      <label style={{ display: 'block', fontWeight: 650, color: theme.text, marginBottom: 6 }}>
+                        {tr('myCarrier.pickup.gps.label', 'GPS')}
+                      </label>
+                      <button className="btn small-cd" onClick={refreshPickupGps} disabled={pickupSubmitting}>
+                        {tr('myCarrier.pickup.gps.getCurrentLocation', 'Get Current Location')}
+                      </button>
+                      <div style={{ marginTop: 8, fontSize: 12, color: theme.muted }}>
+                        {pickupGps?.lat != null
+                          ? `${tr('myCarrier.pickup.gps.latLng', 'Lat/Lng')}: ${Number(pickupGps.lat).toFixed(6)}, ${Number(pickupGps.lng).toFixed(6)} (±${pickupGps?.accuracy ? Math.round(pickupGps.accuracy) : '—'}m)`
+                          : tr('myCarrier.pickup.gps.locationNotCaptured', 'Location not captured')}
+                      </div>
+                    </div>
+
+                    <div style={{ marginTop: 12 }}>
+                      <label style={{ display: 'block', fontWeight: 650, color: theme.text, marginBottom: 6 }}>
+                        {tr('myCarrier.pickup.signature', 'Pickup Signature')} *
+                      </label>
+                      <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                        <div>
+                          <canvas
+                            ref={pickupCanvasRef}
+                            onPointerDown={pickupPointerDown}
+                            onPointerMove={pickupPointerMove}
+                            onPointerUp={pickupPointerUp}
+                            onPointerLeave={pickupPointerUp}
+                            style={{ background: '#ffffff', borderRadius: 10, border: `1px solid ${theme.border}`, touchAction: 'none' }}
+                          />
+                          <div style={{ marginTop: 6, fontSize: 12, color: pickupHasSignature ? '#059669' : theme.muted }}>
+                            {pickupHasSignature ? tr('myCarrier.pickup.signature.captured', 'Signature captured.') : tr('myCarrier.pickup.signature.drawHint', 'Have the shipper sign in the box.')}
+                          </div>
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                          <button
+                            type="button"
+                            onClick={clearPickupSignature}
+                            style={{ padding: '10px 14px', borderRadius: 10, border: `1px solid ${theme.border}`, background: theme.surface, color: theme.text, cursor: 'pointer' }}
+                            disabled={pickupSubmitting}
+                          >
+                            {tr('myCarrier.pickup.signature.clear', 'Clear Signature')}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div style={{ marginTop: 12 }}>
+                      <label style={{ display: 'block', fontWeight: 650, color: theme.text, marginBottom: 6 }}>
+                        {tr('myCarrier.pickup.remarks', 'Remarks (optional)')}
+                      </label>
+                      <textarea
+                        value={pickupRemarks}
+                        onChange={(e) => setPickupRemarks(e.target.value)}
+                        placeholder={tr('myCarrier.pickup.remarksPlaceholder', 'Notes about pickup condition, exceptions, etc.')}
+                        rows={3}
+                        style={{ width: '100%', padding: '10px 12px', borderRadius: 10, border: `1px solid ${theme.border}`, background: theme.surface, color: theme.text }}
+                        disabled={pickupSubmitting}
+                      />
+                    </div>
+
+                    <div style={{ marginTop: 14, display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+                      <button
+                        onClick={() => setShowPickupModal(false)}
+                        style={{ padding: '10px 14px', borderRadius: 10, border: `1px solid ${theme.border}`, background: theme.surface, color: theme.text, cursor: 'pointer' }}
+                        disabled={pickupSubmitting}
+                      >
+                        {tr('common.cancel', 'Cancel')}
+                      </button>
+                      <button className="btn small-cd" onClick={submitPickup} disabled={pickupSubmitting}>
+                        {pickupSubmitting ? tr('myCarrier.common.submitting', 'Submitting…') : tr('myCarrier.pickup.actions.complete', 'Complete Pickup & Start Trip')}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Upload POD Modal */}
           {showPodModal && (
             <div
@@ -1929,6 +2369,13 @@ export default function MyCarrier() {
 
                       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 10 }}>
                         <button
+                          className={`btn small ${podSignMethod === 'draw' ? 'small-cd' : 'ghost-cd'}`}
+                          onClick={() => setPodSignMethod('draw')}
+                          type="button"
+                        >
+                          {tr('myCarrier.pod.signing.draw', 'Draw')}
+                        </button>
+                        <button
                           className={`btn small ${podSignMethod === 'typed' ? 'small-cd' : 'ghost-cd'}`}
                           onClick={() => setPodSignMethod('typed')}
                           type="button"
@@ -1948,6 +2395,39 @@ export default function MyCarrier() {
                           </button>
                         )}
                       </div>
+
+                      {podSignMethod === 'draw' && (
+                        <div style={{ marginBottom: 12 }}>
+                          <label style={{ display: 'block', fontWeight: 650, color: theme.text, marginBottom: 6 }}>
+                            {tr('myCarrier.pod.signing.drawLabel', 'Signature (draw)')} *
+                          </label>
+                          <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                            <div>
+                              <canvas
+                                ref={podCanvasRef}
+                                onPointerDown={podSigPointerDown}
+                                onPointerMove={podSigPointerMove}
+                                onPointerUp={podSigPointerUp}
+                                onPointerLeave={podSigPointerUp}
+                                style={{ background: theme.surface, borderRadius: 10, border: `1px solid ${theme.border}`, touchAction: 'none' }}
+                              />
+                              <div style={{ marginTop: 6, fontSize: 12, color: podHasSignature ? '#059669' : theme.muted }}>
+                                {podHasSignature
+                                  ? tr('myCarrier.pod.signing.drawCaptured', 'Signature captured.')
+                                  : tr('myCarrier.pod.signing.drawHint', 'Draw the receiver signature in the box.')}
+                              </div>
+                            </div>
+                            <button
+                              onClick={clearPodSignature}
+                              style={{ padding: '10px 14px', borderRadius: 10, border: `1px solid ${theme.border}`, background: theme.surface, color: theme.text, cursor: 'pointer' }}
+                              type="button"
+                              disabled={podSubmitting}
+                            >
+                              {tr('myCarrier.pod.signing.clear', 'Clear')}
+                            </button>
+                          </div>
+                        </div>
+                      )}
 
                       <label style={{ display: 'block', fontWeight: 650, color: theme.text, marginBottom: 6 }}>{tr('myCarrier.pod.signing.signerName', 'Signer Name')} *</label>
                       <input

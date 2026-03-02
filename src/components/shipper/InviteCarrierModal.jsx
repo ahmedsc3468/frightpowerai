@@ -134,11 +134,109 @@ export default function InviteCarrierModal({ isOpen, onClose, onInviteSent }) {
     }
   };
 
-  const handleCopyLink = () => {
-    // TODO: Implement actual invite link generation
-    const inviteLink = `${window.location.origin}/carrier-signup?invite=TEMP123`;
-    navigator.clipboard.writeText(inviteLink);
-    alert('Invite link copied to clipboard!');
+  const handleCopyLink = async () => {
+    if (!currentUser) return;
+
+    const carrierId = inviteMode === 'marketplace'
+      ? (selectedCarrier?.id || selectedCarrier?.uid)
+      : null;
+    const carrierEmail = inviteMode === 'email'
+      ? String(email || '').trim()
+      : String(selectedCarrier?.email || '').trim();
+    const carrierName = inviteMode === 'marketplace'
+      ? (selectedCarrier?.name || selectedCarrier?.company_name)
+      : name;
+
+    if (inviteMode === 'marketplace' && !carrierId) {
+      setError('Please select a carrier from the marketplace to generate a link.');
+      return;
+    }
+    if (inviteMode === 'email' && !carrierEmail) {
+      setError('Carrier email is required to generate a link.');
+      return;
+    }
+
+    setSending(true);
+    setError('');
+
+    const requestBody = {
+      load_id: loadId || undefined,
+      message: message || undefined,
+      carrier_id: carrierId || undefined,
+      carrier_email: carrierEmail || undefined,
+      carrier_name: carrierName || undefined,
+    };
+
+    try {
+      const token = await currentUser.getIdToken();
+
+      let invitationId = '';
+      const resp = await fetch(`${API_URL}/carriers/invite`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestBody),
+      });
+
+      if (resp.ok) {
+        const data = await resp.json();
+        invitationId = String(data?.invitation_id || '').trim();
+      } else {
+        // If a pending invitation already exists, lookup the existing ID so the link can still be copied.
+        let detail = '';
+        try {
+          const j = await resp.json();
+          detail = String(j?.detail || '');
+        } catch {
+          try {
+            detail = String(await resp.text());
+          } catch {
+            detail = '';
+          }
+        }
+
+        const isDuplicate = resp.status === 400 && /pending invitation already exists/i.test(detail);
+        if (!isDuplicate) {
+          setError(detail || 'Failed to generate invite link.');
+          return;
+        }
+
+        const listResp = await fetch(`${API_URL}/carriers/invitations?status=pending`, {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+        });
+        if (!listResp.ok) {
+          setError('A pending invitation already exists, but could not be fetched to build a link.');
+          return;
+        }
+        const listData = await listResp.json();
+        const invites = Array.isArray(listData?.invitations) ? listData.invitations : [];
+        const match = invites.find((inv) => {
+          if (!inv || String(inv?.status || '').toLowerCase() !== 'pending') return false;
+          if (carrierId) return String(inv?.carrier_id || '').trim() === String(carrierId).trim();
+          return String(inv?.carrier_email || '').trim().toLowerCase() === String(carrierEmail).toLowerCase();
+        });
+        invitationId = String(match?.id || '').trim();
+      }
+
+      if (!invitationId) {
+        setError('Failed to resolve an invitation ID for the invite link.');
+        return;
+      }
+
+      const inviteLink = `${window.location.origin}/signup?role=carrier&invitation_id=${encodeURIComponent(invitationId)}`;
+      await navigator.clipboard.writeText(inviteLink);
+      alert('Invite link copied to clipboard!');
+    } catch (err) {
+      console.error('Error generating invite link:', err);
+      setError('Failed to generate invite link. Please try again.');
+    } finally {
+      setSending(false);
+    }
   };
 
   if (!isOpen) return null;

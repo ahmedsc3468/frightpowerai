@@ -44,6 +44,22 @@ export default function Signup(){
     }
   },[loc])
 
+  // Support deep links like /signup?role=carrier&invitation_id=INV-XXXX
+  useEffect(() => {
+    try {
+      const qs = new URLSearchParams(loc.search || '')
+      const roleFromQuery = String(qs.get('role') || '').trim()
+      if (roleFromQuery) setRole(roleFromQuery)
+
+      const invitationId = String(qs.get('invitation_id') || qs.get('invite') || '').trim()
+      if (invitationId) {
+        localStorage.setItem('fp_pending_invitation_id', invitationId)
+      }
+    } catch {
+      // ignore
+    }
+  }, [loc.search])
+
   useEffect(()=>{
     const t = setInterval(()=> setCurrentImg((p)=> (p+1)%images.length), 2500)
     return ()=> clearInterval(t)

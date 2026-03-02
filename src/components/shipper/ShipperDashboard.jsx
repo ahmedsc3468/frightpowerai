@@ -7,6 +7,7 @@ import TrackingVisibility from './TrackingVisibility';
 import DocumentVault from './DocumentVault';
 import Finance from './Finance';
 import Messaging from './Messaging';
+import ShipperProfile from './ShipperProfile';
 import '../../styles/carrier/CarrierDashboard.css';
 import '../../styles/shipper/ShipperDashboard.css';
 import MyCarriers from './MyCarriers';
@@ -15,6 +16,7 @@ import ComplianceOverview from './ComplianceOverview';
 import AiHub from './AiHub';
 import ShipperAnalytics from './Analytics';
 import Settings from './Settings';
+import Calendar from './Calendar';
 import AddLoads from '../carrier/AddLoads';
 import DraftLoadsModal from './DraftLoadsModal';
 import InviteCarrierModal from './InviteCarrierModal';
@@ -30,6 +32,8 @@ export default function ShipperDashboard() {
   const { currentUser, logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
+
+  const FALLBACK_AVATAR_URL = 'https://randomuser.me/api/portraits/men/32.jpg';
   const [activeNav, setActiveNav] = useState('home');
   const [trackingInitialLoadId, setTrackingInitialLoadId] = useState(null);
   const [initialThreadId, setInitialThreadId] = useState(null);
@@ -312,7 +316,7 @@ export default function ShipperDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentUser]);
 
-  // Fetch onboarding data on mount
+  // Fetch profile data on mount (canonical source: /auth/me)
   useEffect(() => {
     const fetchProfile = async () => {
       if (!currentUser) {
@@ -321,7 +325,7 @@ export default function ShipperDashboard() {
       }
       try {
         const token = await currentUser.getIdToken();
-        const response = await fetch(`${API_URL}/onboarding/data`, {
+        const response = await fetch(`${API_URL}/auth/me`, {
           headers: {
             'Authorization': `Bearer ${token}`,
             'Content-Type': 'application/json'
@@ -339,6 +343,29 @@ export default function ShipperDashboard() {
     };
     fetchProfile();
   }, [currentUser]);
+
+  const refreshShipperProfile = async (patch = null) => {
+    if (!currentUser) return;
+    if (patch && typeof patch === 'object') {
+      setShipperProfile((prev) => ({ ...(prev || {}), ...patch }));
+    }
+
+    try {
+      const token = await currentUser.getIdToken();
+      const response = await fetch(`${API_URL}/auth/me`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setShipperProfile(data);
+      }
+    } catch {
+      // ignore
+    }
+  };
 
   // Poll messaging unread summary (used for sidebar badge)
   useEffect(() => {
@@ -375,6 +402,7 @@ export default function ShipperDashboard() {
         { key: 'home', label: 'Dashboard', icon: 'fa-solid fa-house' },
         { key: 'my-loads', label: 'My Loads', icon: 'fa-solid fa-truck' },
         { key: 'my-carriers', label: 'My Carriers', icon: 'fa-solid fa-people-group' },
+        { key: 'calendar', label: 'Calendar', icon: 'fa-regular fa-calendar-days' },
         { key: 'marketplace', label: 'Marketplace', icon: 'fa-solid fa-store' },
         { key: 'messaging', label: 'Messaging', icon: 'fa-solid fa-comments' },
         { key: 'alerts', label: 'Alerts & Notifications', icon: 'fa-solid fa-bell' },
@@ -513,30 +541,24 @@ export default function ShipperDashboard() {
         </header>
 
         {/* Shipper Profile Card - Shows onboarding data */}
-        {!profileLoading && shipperProfile && shipperProfile.data && (
+        {!profileLoading && shipperProfile && (
           <section style={{ marginBottom: '20px' }}>
             <div className="card" style={{ padding: '20px', background: '#f8fafc' }}>
               <div className="card-header">
                 <h3><i className="fa-solid fa-building" style={{ marginRight: '8px' }}></i>Business Profile</h3>
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px', marginTop: '16px' }}>
-                {shipperProfile.data.businessName && (
-                  <div><strong>Business:</strong> {shipperProfile.data.businessName}</div>
+                {shipperProfile.company_name && (
+                  <div><strong>Business:</strong> {shipperProfile.company_name}</div>
                 )}
-                {shipperProfile.data.businessType && (
-                  <div><strong>Type:</strong> {shipperProfile.data.businessType}</div>
+                {shipperProfile.business_type && (
+                  <div><strong>Type:</strong> {shipperProfile.business_type}</div>
                 )}
-                {shipperProfile.data.contactFullName && (
-                  <div><strong>Contact:</strong> {shipperProfile.data.contactFullName}</div>
+                {shipperProfile.name && (
+                  <div><strong>Contact:</strong> {shipperProfile.name}</div>
                 )}
-                {shipperProfile.data.contactEmail && (
-                  <div><strong>Email:</strong> {shipperProfile.data.contactEmail}</div>
-                )}
-                {shipperProfile.data.freightType && (
-                  <div><strong>Freight Type:</strong> {shipperProfile.data.freightType}</div>
-                )}
-                {shipperProfile.data.regionsOfOperation && (
-                  <div><strong>Regions:</strong> {shipperProfile.data.regionsOfOperation}</div>
+                {shipperProfile.email && (
+                  <div><strong>Email:</strong> {shipperProfile.email}</div>
                 )}
               </div>
               {!shipperProfile.onboarding_completed && (
@@ -759,16 +781,17 @@ export default function ShipperDashboard() {
     if (activeNav === 'home') return <HomeView />;
     if (activeNav === 'my-loads') return <ShipperMyLoads />;
     if (activeNav === 'my-carriers') return <MyCarriers />;
+    if (activeNav === 'calendar') return <Calendar />;
     if (activeNav === 'marketplace') return <ShipperMarketplace />;
     if (activeNav === 'carrier-bids') return <CarrierBids />;
     if (activeNav === 'alerts') return (
       <div>
-        <header className="fp-header">
-          <div className="fp-header-titles">
+        <header className="fp-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12 }}>
+          <div className="fp-header-titles" style={{ minWidth: 240, flex: '1 1 360px' }}>
             <h2>Alerts &amp; Notifications</h2>
             <p className="fp-subtitle">Updates, reminders, and important alerts.</p>
           </div>
-          <div className="fp-header-controls">
+          <div className="fp-header-controls" style={{ display: 'flex', justifyContent: 'flex-end', flex: '0 0 auto' }}>
             <button
               type="button"
               className="btn small ghost-cd"
@@ -779,8 +802,8 @@ export default function ShipperDashboard() {
             </button>
           </div>
         </header>
-        <section className="fp-grid">
-          <div className="card">
+        <section className="fp-grid" style={{ gridTemplateColumns: '1fr' }}>
+          <div className="card" style={{ gridColumn: '1 / -1' }}>
             <div className="card-header"><h3>Notifications</h3></div>
             <div style={{ maxHeight: 560, overflowY: 'auto', padding: 14 }}>
               {Boolean(notifLoading) ? (
@@ -848,12 +871,9 @@ export default function ShipperDashboard() {
             <p className="fp-subtitle">Complete your business profile and onboarding information.</p>
           </div>
         </header>
-        <section className="fp-grid">
-          <div className="card">
-            <div className="card-header"><h3>Profile Component</h3></div>
-            <div style={{ padding: 20 }}>
-              <p>Profile component will be added here. This is where users can complete their onboarding details.</p>
-            </div>
+        <section className="fp-grid" style={{ gridTemplateColumns: '1fr' }}>
+          <div style={{ gridColumn: '1 / -1', minWidth: 0 }}>
+            <ShipperProfile onProfileUpdate={refreshShipperProfile} />
           </div>
         </section>
       </div>
@@ -1014,7 +1034,14 @@ export default function ShipperDashboard() {
                 )}
               </div>
               <i className="fa-solid fa-robot bot-icon" aria-hidden="true" />
-              <img src="https://randomuser.me/api/portraits/women/65.jpg" alt="avatar" className="avatar-img"/>
+              <img
+                src={shipperProfile?.profile_picture_url || FALLBACK_AVATAR_URL}
+                alt="avatar"
+                className="avatar-img"
+                onError={(e) => {
+                  e.target.src = FALLBACK_AVATAR_URL;
+                }}
+              />
             </div>
           </div>
         </div>
@@ -1027,7 +1054,7 @@ export default function ShipperDashboard() {
               <div className="logo"><img src={logo} alt="FreightPower" className="landing-logo-image" /></div>
             </div>
             <div className="chips sidebar-chips">
-              <div className="company-name">Atlas Logistics LLC</div>
+              <div className="company-name">{shipperProfile?.company_name || 'Your Company'}</div>
               <span className="int-status-badge active">Active & Operating</span>
               <span className="int-status-badge blue">TMS Connected</span>
             </div>

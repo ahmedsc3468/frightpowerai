@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import '../../styles/carrier/Settings.css';
 import { useAuth } from '../../contexts/AuthContext';
 import { API_URL } from '../../config';
+import tzLookup from 'tz-lookup';
 
 export default function Settings() {
   const { currentUser } = useAuth();
@@ -36,6 +37,198 @@ export default function Settings() {
     safetyContact: 'safety@translogistics.com',
     billingContact: 'billing@translogistics.com'
   });
+
+  const [prefsLoading, setPrefsLoading] = useState(false);
+  const [prefsSaving, setPrefsSaving] = useState(false);
+
+  const normalizeNotificationPreferencesInAppOnly = (prefs) => {
+    const p = (prefs && typeof prefs === 'object') ? prefs : {};
+    const defaultToTrue = (value) => (value === false ? false : true);
+    return {
+      loads_in_app: defaultToTrue(p.loads_in_app),
+      loads_email: false,
+      loads_sms: false,
+      compliance_in_app: defaultToTrue(p.compliance_in_app),
+      compliance_email: false,
+      compliance_sms: false,
+      finance_in_app: defaultToTrue(p.finance_in_app),
+      finance_email: false,
+      finance_sms: false,
+    };
+  };
+
+  const [preferences, setPreferences] = useState(() => {
+    let stored = {};
+    try {
+      stored = JSON.parse(localStorage.getItem('fp_carrier_preferences') || '{}') || {};
+    } catch {
+      stored = {};
+    }
+
+    const storedTheme = (localStorage.getItem('fp_theme_preference') || '').trim().toLowerCase();
+    const theme = storedTheme === 'light' || storedTheme === 'dark' || storedTheme === 'device' ? storedTheme : 'device';
+
+    const defaultDocumentExportType = String(stored.defaultDocumentExportType || '').trim().toLowerCase();
+    const normalizedExportType = defaultDocumentExportType === 'pdf' || defaultDocumentExportType === 'json' || defaultDocumentExportType === 'csv'
+      ? defaultDocumentExportType
+      : 'pdf';
+
+    return {
+      language: stored.language || 'English',
+      dateFormat: stored.dateFormat || 'mdy', // mdy | dmy | ymd
+      timeZone: stored.timeZone || '', // IANA time zone name
+      currency: stored.currency || 'USD',
+
+      notificationPreferences: normalizeNotificationPreferencesInAppOnly(stored.notificationPreferences),
+
+      quietHoursStart: stored.quietHoursStart || '10:00 PM',
+      quietHoursEnd: stored.quietHoursEnd || '7:00 AM',
+
+      paymentTerms: stored.paymentTerms || 'Net 30',
+      defaultInvoiceCurrency: stored.defaultInvoiceCurrency || (stored.currency || 'USD'),
+      autoSendInvoices: Boolean(stored.autoSendInvoices),
+
+      theme,
+      defaultView: stored.defaultView || 'My Loads Default View',
+      defaultDocumentExportType: normalizedExportType,
+    };
+  });
+
+  const persistPreferences = (patch) => {
+    setPreferences((prev) => {
+      const next = { ...prev, ...patch };
+      try {
+        localStorage.setItem('fp_carrier_preferences', JSON.stringify(next));
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  };
+
+  const patchAuthSettings = async (update) => {
+    if (!currentUser) return;
+    try {
+      setPrefsSaving(true);
+      const token = await currentUser.getIdToken();
+      const res = await fetch(`${API_URL}/auth/settings`, {
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(update || {}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.detail || 'Failed to update preferences');
+      return data;
+    } finally {
+      setPrefsSaving(false);
+    }
+  };
+
+  const detectDeviceTimeZone = async () => {
+    const fallback = () => {
+      try {
+        return Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+      } catch {
+        return '';
+      }
+    };
+
+    if (!('geolocation' in navigator) || typeof navigator.geolocation?.getCurrentPosition !== 'function') {
+      return fallback();
+    }
+
+    return await new Promise((resolve) => {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          try {
+            const tz = tzLookup(pos.coords.latitude, pos.coords.longitude);
+            resolve(tz || fallback());
+          } catch {
+            resolve(fallback());
+          }
+        },
+        () => resolve(fallback()),
+        { enableHighAccuracy: false, timeout: 8000, maximumAge: 60 * 60 * 1000 }
+      );
+    });
+  };
+
+  const applyThemePreference = (pref) => {
+    const normalized = String(pref || '').trim().toLowerCase();
+    const next = normalized === 'light' || normalized === 'dark' || normalized === 'device' ? normalized : 'device';
+    try {
+      localStorage.setItem('fp_theme_preference', next);
+    } catch {
+      // ignore
+    }
+    persistPreferences({ theme: next });
+    window.dispatchEvent(new CustomEvent('fp-theme-preference', { detail: { preference: next } }));
+  };
+
+  useEffect(() => {
+    const run = async () => {
+      if (activeTab !== 'preferences' || !currentUser) return;
+
+      try {
+        setPrefsLoading(true);
+        const token = await currentUser.getIdToken();
+        const res = await fetch(`${API_URL}/auth/settings`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'Content-Type': 'application/json',
+          },
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data?.detail || 'Failed to load preferences');
+
+        persistPreferences({
+          language: data?.language || 'English',
+          dateFormat: data?.date_format || preferences.dateFormat || 'mdy',
+          timeZone: data?.time_zone || preferences.timeZone || '',
+          notificationPreferences:
+            normalizeNotificationPreferencesInAppOnly(
+              (typeof data?.notification_preferences === 'object' && data.notification_preferences)
+                ? data.notification_preferences
+                : preferences.notificationPreferences
+            ),
+        });
+
+        const serverNotifs = (typeof data?.notification_preferences === 'object' && data.notification_preferences)
+          ? data.notification_preferences
+          : null;
+        if (serverNotifs) {
+          const normalized = normalizeNotificationPreferencesInAppOnly(serverNotifs);
+          if (JSON.stringify(normalized) !== JSON.stringify(serverNotifs)) {
+            try {
+              await patchAuthSettings({ notification_preferences: normalized });
+            } catch {
+              // ignore
+            }
+          }
+        }
+      } catch (e) {
+        setMessage({ type: 'error', text: e?.message || 'Failed to load preferences' });
+      } finally {
+        setPrefsLoading(false);
+      }
+
+      try {
+        const tz = await detectDeviceTimeZone();
+        if (tz && tz !== (preferences.timeZone || '')) {
+          persistPreferences({ timeZone: tz });
+          await patchAuthSettings({ time_zone: tz });
+        }
+      } catch {
+        // ignore
+      }
+    };
+
+    run();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, currentUser]);
 
   useEffect(() => {
     const run = async () => {
@@ -323,6 +516,15 @@ export default function Settings() {
     // Implementation for logo upload
   };
 
+  const renderComingSoonPanel = (content) => (
+    <div className="tab-panel settings-coming-soon" aria-disabled="true">
+      <div className="settings-coming-soon__content">{content}</div>
+      <div className="settings-coming-soon__overlay">
+        <div className="settings-coming-soon__label">COMING SOON</div>
+      </div>
+    </div>
+  );
+
   return (
     <div className="settings-container">
       <header className="settings-header">
@@ -560,8 +762,8 @@ export default function Settings() {
         )}
 
         {/* Roles & Permissions Tab */}
-        {activeTab === 'roles-permissions' && (
-          <div className="tab-panel">
+        {activeTab === 'roles-permissions' && renderComingSoonPanel(
+          <>
             <div className="roles-header">
               <div className="roles-actions">
                 <button className="btn small ghost-cd">
@@ -711,12 +913,12 @@ export default function Settings() {
                 </div>
               </div>
             </div>
-          </div>
+          </>
         )}
 
         {/* User Management Tab */}
-        {activeTab === 'user-management' && (
-          <div className="tab-panel">
+        {activeTab === 'user-management' && renderComingSoonPanel(
+          <>
             {/* User Statistics */}
             <div className="user-stats">
               <div className="stat-item">
@@ -1009,12 +1211,12 @@ export default function Settings() {
                 ))}
               </div>
             </div>
-          </div>
+          </>
         )}
 
         {/* Security Settings Tab */}
-        {activeTab === 'security' && (
-          <div className="tab-panel">
+        {activeTab === 'security' && renderComingSoonPanel(
+          <>
 
             {/* Authentication Settings */}
             <div className="security-section">
@@ -1273,12 +1475,12 @@ export default function Settings() {
               <button className="btn small ghost-cd">Cancel</button>
               <button className="btn small-cd">Save Changes</button>
             </div>
-          </div>
+          </>
         )}
 
         {/* API & Webhooks Tab */}
-        {activeTab === 'api-webhooks' && (
-          <div className="tab-panel">
+        {activeTab === 'api-webhooks' && renderComingSoonPanel(
+          <>
 
             {/* API Keys Section */}
             <div className="api-section">
@@ -1443,7 +1645,7 @@ export default function Settings() {
                 </div>
               </div>
             </div>
-          </div>
+          </>
         )}
 
         {/* Preferences Tab */}
@@ -1461,10 +1663,22 @@ export default function Settings() {
                     <label>Default Language</label>
                   </div>
                   <div className="locale-select">
-                    <select defaultValue="English">
-                      <option>English</option>
-                      <option>Spanish</option>
-                      <option>French</option>
+                    <select
+                      value={preferences.language}
+                      disabled={prefsLoading || prefsSaving}
+                      onChange={async (e) => {
+                        const value = e.target.value;
+                        persistPreferences({ language: value });
+                        try {
+                          await patchAuthSettings({ language: value });
+                        } catch (err) {
+                          setMessage({ type: 'error', text: err?.message || 'Failed to update language' });
+                        }
+                      }}
+                    >
+                      <option value="English">English</option>
+                      <option value="Spanish">Spanish</option>
+                      <option value="French">French</option>
                     </select>
                   </div>
                 </div>
@@ -1474,10 +1688,22 @@ export default function Settings() {
                     <label>Date Format</label>
                   </div>
                   <div className="locale-select">
-                    <select defaultValue="MM/DD/YYYY">
-                      <option>MM/DD/YYYY</option>
-                      <option>DD/MM/YYYY</option>
-                      <option>YYYY-MM-DD</option>
+                    <select
+                      value={preferences.dateFormat}
+                      disabled={prefsLoading || prefsSaving}
+                      onChange={async (e) => {
+                        const value = e.target.value;
+                        persistPreferences({ dateFormat: value });
+                        try {
+                          await patchAuthSettings({ date_format: value });
+                        } catch (err) {
+                          setMessage({ type: 'error', text: err?.message || 'Failed to update date format' });
+                        }
+                      }}
+                    >
+                      <option value="mdy">MM/DD/YYYY</option>
+                      <option value="dmy">DD/MM/YYYY</option>
+                      <option value="ymd">YYYY-MM-DD</option>
                     </select>
                   </div>
                 </div>
@@ -1487,11 +1713,10 @@ export default function Settings() {
                     <label>Time Zone</label>
                   </div>
                   <div className="locale-select">
-                    <select defaultValue="Eastern Time (ET)">
-                      <option>Eastern Time (ET)</option>
-                      <option>Central Time (CT)</option>
-                      <option>Mountain Time (MT)</option>
-                      <option>Pacific Time (PT)</option>
+                    <select value={preferences.timeZone || ''} disabled>
+                      <option value={preferences.timeZone || ''}>
+                        {preferences.timeZone || (prefsLoading ? 'Detecting…' : '—')}
+                      </option>
                     </select>
                   </div>
                 </div>
@@ -1501,10 +1726,17 @@ export default function Settings() {
                     <label>Currency</label>
                   </div>
                   <div className="locale-select">
-                    <select defaultValue="USD">
-                      <option>USD</option>
-                      <option>CAD</option>
-                      <option>EUR</option>
+                    <select
+                      value={preferences.currency}
+                      disabled={prefsLoading || prefsSaving}
+                      onChange={(e) => {
+                        const value = e.target.value;
+                        persistPreferences({ currency: value, defaultInvoiceCurrency: value });
+                      }}
+                    >
+                      <option value="USD">USD</option>
+                      <option value="CAD">CAD</option>
+                      <option value="EUR">EUR</option>
                     </select>
                   </div>
                 </div>
@@ -1529,39 +1761,117 @@ export default function Settings() {
                     <div className="notification-row">
                       <div className="category-name">Loads</div>
                       <div className="channel-checkbox">
-                        <input type="checkbox" defaultChecked />
+                        <input
+                          type="checkbox"
+                          checked={Boolean(preferences.notificationPreferences?.loads_in_app)}
+                          disabled={prefsLoading || prefsSaving}
+                          onChange={async (e) => {
+                              const next = normalizeNotificationPreferencesInAppOnly({
+                                ...(preferences.notificationPreferences || {}),
+                                loads_in_app: e.target.checked,
+                              });
+                            persistPreferences({ notificationPreferences: next });
+                            try {
+                              await patchAuthSettings({ notification_preferences: next });
+                            } catch (err) {
+                              setMessage({ type: 'error', text: err?.message || 'Failed to update notification preferences' });
+                            }
+                          }}
+                        />
                       </div>
                       <div className="channel-checkbox">
-                        <input type="checkbox" defaultChecked />
+                        <input
+                          type="checkbox"
+                          checked={Boolean(preferences.notificationPreferences?.loads_email)}
+                          disabled
+                          onChange={() => {}}
+                        />
                       </div>
                       <div className="channel-checkbox">
-                        <input type="checkbox" />
+                        <input
+                          type="checkbox"
+                          checked={Boolean(preferences.notificationPreferences?.loads_sms)}
+                          disabled
+                          onChange={() => {}}
+                        />
                       </div>
                     </div>
 
                     <div className="notification-row">
                       <div className="category-name">Compliance</div>
                       <div className="channel-checkbox">
-                        <input type="checkbox" defaultChecked />
+                        <input
+                          type="checkbox"
+                          checked={Boolean(preferences.notificationPreferences?.compliance_in_app)}
+                          disabled={prefsLoading || prefsSaving}
+                          onChange={async (e) => {
+                              const next = normalizeNotificationPreferencesInAppOnly({
+                                ...(preferences.notificationPreferences || {}),
+                                compliance_in_app: e.target.checked,
+                              });
+                            persistPreferences({ notificationPreferences: next });
+                            try {
+                              await patchAuthSettings({ notification_preferences: next });
+                            } catch (err) {
+                              setMessage({ type: 'error', text: err?.message || 'Failed to update notification preferences' });
+                            }
+                          }}
+                        />
                       </div>
                       <div className="channel-checkbox">
-                        <input type="checkbox" defaultChecked />
+                        <input
+                          type="checkbox"
+                          checked={Boolean(preferences.notificationPreferences?.compliance_email)}
+                          disabled
+                          onChange={() => {}}
+                        />
                       </div>
                       <div className="channel-checkbox">
-                        <input type="checkbox" defaultChecked />
+                        <input
+                          type="checkbox"
+                          checked={Boolean(preferences.notificationPreferences?.compliance_sms)}
+                          disabled
+                          onChange={() => {}}
+                        />
                       </div>
                     </div>
 
                     <div className="notification-row">
                       <div className="category-name">Finance</div>
                       <div className="channel-checkbox">
-                        <input type="checkbox" defaultChecked />
+                        <input
+                          type="checkbox"
+                          checked={Boolean(preferences.notificationPreferences?.finance_in_app)}
+                          disabled={prefsLoading || prefsSaving}
+                          onChange={async (e) => {
+                              const next = normalizeNotificationPreferencesInAppOnly({
+                                ...(preferences.notificationPreferences || {}),
+                                finance_in_app: e.target.checked,
+                              });
+                            persistPreferences({ notificationPreferences: next });
+                            try {
+                              await patchAuthSettings({ notification_preferences: next });
+                            } catch (err) {
+                              setMessage({ type: 'error', text: err?.message || 'Failed to update notification preferences' });
+                            }
+                          }}
+                        />
                       </div>
                       <div className="channel-checkbox">
-                        <input type="checkbox" defaultChecked />
+                        <input
+                          type="checkbox"
+                          checked={Boolean(preferences.notificationPreferences?.finance_email)}
+                          disabled
+                          onChange={() => {}}
+                        />
                       </div>
                       <div className="channel-checkbox">
-                        <input type="checkbox" />
+                        <input
+                          type="checkbox"
+                          checked={Boolean(preferences.notificationPreferences?.finance_sms)}
+                          disabled
+                          onChange={() => {}}
+                        />
                       </div>
                     </div>
                   </div>
@@ -1575,13 +1885,21 @@ export default function Settings() {
                 <div className="quiet-hours-content">
                   <span>No notifications during these hours</span>
                   <div className="time-selectors">
-                    <select defaultValue="10:00 PM">
+                    <select
+                      value={preferences.quietHoursStart}
+                      disabled={prefsLoading || prefsSaving}
+                      onChange={(e) => persistPreferences({ quietHoursStart: e.target.value })}
+                    >
                       <option>9:00 PM</option>
                       <option>10:00 PM</option>
                       <option>11:00 PM</option>
                     </select>
                     <span>to</span>
-                    <select defaultValue="7:00 AM">
+                    <select
+                      value={preferences.quietHoursEnd}
+                      disabled={prefsLoading || prefsSaving}
+                      onChange={(e) => persistPreferences({ quietHoursEnd: e.target.value })}
+                    >
                       <option>6:00 AM</option>
                       <option>7:00 AM</option>
                       <option>8:00 AM</option>
@@ -1602,20 +1920,7 @@ export default function Settings() {
                     <label>Invoice Prefix</label>
                   </div>
                   <div className="finance-input">
-                    <input type="text" defaultValue="FPA-" />
-                  </div>
-                </div>
-
-                <div className="finance-row">
-                  <div className="finance-label">
-                    <label>Numbering Format</label>
-                  </div>
-                  <div className="finance-select">
-                    <select defaultValue="Sequential">
-                      <option>Sequential</option>
-                      <option>Date-based</option>
-                      <option>Custom</option>
-                    </select>
+                    <input type="text" value="INV{LOAD_ID}" readOnly disabled />
                   </div>
                 </div>
 
@@ -1624,11 +1929,15 @@ export default function Settings() {
                     <label>Payment Terms</label>
                   </div>
                   <div className="finance-select">
-                    <select defaultValue="Net 30">
-                      <option>Net 15</option>
-                      <option>Net 30</option>
-                      <option>Net 45</option>
-                      <option>Net 60</option>
+                    <select
+                      value={preferences.paymentTerms}
+                      disabled={prefsLoading || prefsSaving}
+                      onChange={(e) => persistPreferences({ paymentTerms: e.target.value })}
+                    >
+                      <option value="Net 15">Net 15</option>
+                      <option value="Net 30">Net 30</option>
+                      <option value="Net 45">Net 45</option>
+                      <option value="Net 60">Net 60</option>
                     </select>
                   </div>
                 </div>
@@ -1638,10 +1947,14 @@ export default function Settings() {
                     <label>Default Currency</label>
                   </div>
                   <div className="finance-select">
-                    <select defaultValue="USD">
-                      <option>USD</option>
-                      <option>CAD</option>
-                      <option>EUR</option>
+                    <select
+                      value={preferences.defaultInvoiceCurrency}
+                      disabled={prefsLoading || prefsSaving}
+                      onChange={(e) => persistPreferences({ defaultInvoiceCurrency: e.target.value })}
+                    >
+                      <option value="USD">USD</option>
+                      <option value="CAD">CAD</option>
+                      <option value="EUR">EUR</option>
                     </select>
                   </div>
                 </div>
@@ -1649,7 +1962,12 @@ export default function Settings() {
 
               <div className="finance-checkbox">
                 <label className="checkbox-label">
-                  <input type="checkbox" />
+                  <input
+                    type="checkbox"
+                    checked={Boolean(preferences.autoSendInvoices)}
+                    disabled={prefsLoading || prefsSaving}
+                    onChange={(e) => persistPreferences({ autoSendInvoices: e.target.checked })}
+                  />
                   Auto-send invoices when loads are completed
                 </label>
               </div>
@@ -1666,10 +1984,14 @@ export default function Settings() {
                     <label>Theme</label>
                   </div>
                   <div className="dashboard-select">
-                    <select defaultValue="Light">
-                      <option>Light</option>
-                      <option>Dark</option>
-                      <option>Auto</option>
+                    <select
+                      value={preferences.theme}
+                      disabled={prefsLoading || prefsSaving}
+                      onChange={(e) => applyThemePreference(e.target.value)}
+                    >
+                      <option value="light">Light</option>
+                      <option value="dark">Dark</option>
+                      <option value="device">Device</option>
                     </select>
                   </div>
                 </div>
@@ -1679,23 +2001,31 @@ export default function Settings() {
                     <label>Default View</label>
                   </div>
                   <div className="dashboard-select">
-                    <select defaultValue="My Loads Default View">
-                      <option>My Loads Default View</option>
-                      <option>Dashboard Overview</option>
-                      <option>Analytics</option>
+                    <select
+                      value={preferences.defaultView}
+                      disabled={prefsLoading || prefsSaving}
+                      onChange={(e) => persistPreferences({ defaultView: e.target.value })}
+                    >
+                      <option value="My Loads Default View">My Loads Default View</option>
+                      <option value="Dashboard Overview">Dashboard Overview</option>
+                      <option value="Analytics">Analytics</option>
                     </select>
                   </div>
                 </div>
 
                 <div className="dashboard-row">
                   <div className="dashboard-label">
-                    <label>My Loads Default View</label>
+                    <label>Default Document Export type</label>
                   </div>
                   <div className="dashboard-select">
-                    <select defaultValue="Active">
-                      <option>Active</option>
-                      <option>Completed</option>
-                      <option>All Loads</option>
+                    <select
+                      value={preferences.defaultDocumentExportType}
+                      disabled={prefsLoading || prefsSaving}
+                      onChange={(e) => persistPreferences({ defaultDocumentExportType: e.target.value })}
+                    >
+                      <option value="pdf">PDF</option>
+                      <option value="json">JSON</option>
+                      <option value="csv">CSV</option>
                     </select>
                   </div>
                 </div>
@@ -1703,6 +2033,7 @@ export default function Settings() {
             </div>
 
             {/* Document Handling */}
+            {/*
             <div className="preferences-card">
               <h3>Document Handling</h3>
               <p>Configure document categorization and archival settings</p>
@@ -1719,6 +2050,7 @@ export default function Settings() {
                 </label>
               </div>
             </div>
+            */}
 
           </div>
         )}

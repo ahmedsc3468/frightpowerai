@@ -27,7 +27,10 @@ service cloud.firestore {
     // Super admin can read/write all user documents (needed for admin approvals).
     match /users/{userId} {
       allow read: if signedIn() && (request.auth.uid == userId || isSuperAdmin() || isAdmin());
-      allow write: if signedIn() && (request.auth.uid == userId || isSuperAdmin());
+      // IMPORTANT: block client-side writes to user profiles.
+      // The backend (Admin SDK) performs all trusted writes.
+      // This prevents role escalation (e.g. self-setting role=admin) and tampering with onboarding_data.
+      allow write: if signedIn() && isSuperAdmin();
     }
 
     // Admin signup approval queue

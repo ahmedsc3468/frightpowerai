@@ -35,6 +35,7 @@ def set_contract_rate_con_signature(
     signer_role: str,
     signer_uid: str,
     signer_name: Optional[str] = None,
+    signature_doc: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     signer_role = _safe_str(signer_role).lower()
     signer_uid = _safe_str(signer_uid)
@@ -49,11 +50,21 @@ def set_contract_rate_con_signature(
         rc.setdefault("shipper_signed_by_uid", signer_uid)
         if signer_name:
             rc.setdefault("shipper_signed_by_name", signer_name)
+        if isinstance(signature_doc, dict):
+            if signature_doc.get("doc_id"):
+                rc.setdefault("shipper_signature_doc_id", signature_doc.get("doc_id"))
+            if signature_doc.get("url"):
+                rc.setdefault("shipper_signature_url", signature_doc.get("url"))
     elif signer_role == "carrier":
         rc.setdefault("carrier_signed_at", ts)
         rc.setdefault("carrier_signed_by_uid", signer_uid)
         if signer_name:
             rc.setdefault("carrier_signed_by_name", signer_name)
+        if isinstance(signature_doc, dict):
+            if signature_doc.get("doc_id"):
+                rc.setdefault("carrier_signature_doc_id", signature_doc.get("doc_id"))
+            if signature_doc.get("url"):
+                rc.setdefault("carrier_signature_url", signature_doc.get("url"))
     else:
         raise ValueError("invalid signer_role")
 

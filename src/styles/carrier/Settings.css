@@ -115,6 +115,37 @@
   bottom: -6px;
 }
 
+/* Coming Soon overlay for disabled Settings tabs */
+.settings-coming-soon {
+  position: relative;
+}
+
+.settings-coming-soon__content {
+  filter: grayscale(1);
+  opacity: 0.35;
+  pointer-events: none;
+  user-select: none;
+}
+
+.settings-coming-soon__overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.settings-coming-soon__label {
+  font-weight: 800;
+  color: #000;
+  background: #fff;
+  border: 1px solid var(--settings-border);
+  border-radius: 12px;
+  padding: 12px 16px;
+  letter-spacing: 0.02em;
+}
+
 /* Marketplace Tab Responsive Styles - Exact copy from Marketplace */
 @media (max-width: 900px) {
   .marketplace-tabs {
@@ -2927,15 +2958,15 @@ box-shadow:0 0 0 0.5px #3B57A7,0 4px 8px -5px rgba(0,0,0,0.15)!important;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
 }
 
-input[type="checkbox"]:checked + .security-toggle {
+.toggle-wrapper input[type="checkbox"]:checked + .security-toggle {
   background: linear-gradient(#7FA4F6 0%, #3B57A7 100%);
 }
 
-input[type="checkbox"]:checked + .security-toggle::before {
+.toggle-wrapper input[type="checkbox"]:checked + .security-toggle::before {
   transform: translateX(20px);
 }
 
-input[type="checkbox"] {
+.toggle-wrapper input[type="checkbox"] {
   display: none;
 }
 

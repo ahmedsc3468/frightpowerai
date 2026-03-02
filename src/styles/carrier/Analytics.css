@@ -259,6 +259,132 @@
   margin: 0;
 }
 
+/* Custom Range Modal */
+.analytics-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  padding: 20px;
+}
+
+.analytics-modal-content {
+  background: #fff;
+  border-radius: 16px;
+  width: 100%;
+  max-width: 520px;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+}
+
+.dark-root .analytics-modal-content {
+  background: #2c2c2c;
+  color: #d1d5db;
+}
+
+.analytics-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 18px 18px 14px 18px;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+.dark-root .analytics-modal-header {
+  border-bottom-color: #3a3a3a;
+}
+
+.analytics-modal-header h3 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  color: #111827;
+}
+
+.dark-root .analytics-modal-header h3 {
+  color: #fff;
+}
+
+.analytics-modal-close {
+  background: transparent;
+  border: none;
+  font-size: 20px;
+  cursor: pointer;
+  color: #6b7280;
+  padding: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+}
+
+.dark-root .analytics-modal-close {
+  color: #d1d5db;
+}
+
+.analytics-modal-body {
+  padding: 16px 18px;
+}
+
+.analytics-range-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.analytics-range-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: #64748b;
+  margin-bottom: 6px;
+}
+
+.dark-root .analytics-range-label {
+  color: #a3a3a3;
+}
+
+.analytics-range-row input[type="date"] {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  font-size: 14px;
+  outline: none;
+}
+
+.dark-root .analytics-range-row input[type="date"] {
+  background: #1f1f1f;
+  color: #f1f5f9;
+  border-color: #333436;
+}
+
+.analytics-range-error {
+  margin-top: 10px;
+  color: #ef4444;
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.analytics-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 14px 18px 18px 18px;
+  border-top: 1px solid #f1f5f9;
+}
+
+.dark-root .analytics-modal-actions {
+  border-top-color: #3a3a3a;
+}
+
 /* Dashboard Placeholder */
 .dashboard-placeholder {
   display: flex;

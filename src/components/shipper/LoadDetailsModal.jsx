@@ -8,6 +8,10 @@ export default function LoadDetailsModal({ load, onClose }) {
   const [loadLoading, setLoadLoading] = useState(false);
   const [loadError, setLoadError] = useState('');
 
+  const [rcSigHasInk, setRcSigHasInk] = useState(false);
+  const rcSigCanvasRef = React.useRef(null);
+  const rcSigDrawRef = React.useRef({ drawing: false, lastX: 0, lastY: 0 });
+
   const [docsLoading, setDocsLoading] = useState(false);
   const [docsError, setDocsError] = useState('');
   const [documents, setDocuments] = useState([]);
@@ -137,13 +141,21 @@ export default function LoadDetailsModal({ load, onClose }) {
     try {
       const token = await currentUser.getIdToken();
       const signerName = String(currentUser?.displayName || currentUser?.email || '').trim() || undefined;
+
+      const canvas = rcSigCanvasRef.current;
+      const signatureDataUrl = canvas ? canvas.toDataURL('image/png') : '';
+      if (!rcSigHasInk || !signatureDataUrl) {
+        setSignError('Signature is required.');
+        return;
+      }
+
       const res = await fetch(`${API_URL}/loads/${encodeURIComponent(loadId)}/rate-confirmation/shipper-sign`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ signer_name: signerName }),
+        body: JSON.stringify({ signer_name: signerName, signature_data_url: signatureDataUrl }),
       });
       if (!res.ok) {
         let msg = 'Failed to sign';
@@ -165,6 +177,65 @@ export default function LoadDetailsModal({ load, onClose }) {
       setSigning(false);
     }
   };
+
+  const initRcSigCanvas = () => {
+    const canvas = rcSigCanvasRef.current;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const cssW = 520;
+    const cssH = 160;
+    canvas.style.width = `${cssW}px`;
+    canvas.style.height = `${cssH}px`;
+    canvas.width = Math.floor(cssW * dpr);
+    canvas.height = Math.floor(cssH * dpr);
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.lineWidth = 2;
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = '#111827';
+    ctx.clearRect(0, 0, cssW, cssH);
+    setRcSigHasInk(false);
+  };
+
+  const clearRcSig = () => {
+    initRcSigCanvas();
+  };
+
+  const rcSigPointerDown = (e) => {
+    const canvas = rcSigCanvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX ?? 0) - rect.left;
+    const y = (e.clientY ?? 0) - rect.top;
+    rcSigDrawRef.current = { drawing: true, lastX: x, lastY: y };
+  };
+
+  const rcSigPointerMove = (e) => {
+    const canvas = rcSigCanvasRef.current;
+    if (!canvas) return;
+    if (!rcSigDrawRef.current.drawing) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX ?? 0) - rect.left;
+    const y = (e.clientY ?? 0) - rect.top;
+    const ctx = canvas.getContext('2d');
+    ctx.beginPath();
+    ctx.moveTo(rcSigDrawRef.current.lastX, rcSigDrawRef.current.lastY);
+    ctx.lineTo(x, y);
+    ctx.stroke();
+    rcSigDrawRef.current.lastX = x;
+    rcSigDrawRef.current.lastY = y;
+    setRcSigHasInk(true);
+  };
+
+  const rcSigPointerUp = () => {
+    rcSigDrawRef.current.drawing = false;
+  };
+
+  useEffect(() => {
+    if (!loadId) return;
+    initRcSigCanvas();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadId]);
 
   if (!loadId) return null;
 
@@ -242,7 +313,7 @@ export default function LoadDetailsModal({ load, onClose }) {
                 className="btn small-cd"
                 type="button"
                 onClick={shipperSignRateConfirmation}
-                disabled={signing || Boolean(rcSignature?.shipperSignedAt) || loadLoading}
+                disabled={signing || Boolean(rcSignature?.shipperSignedAt) || loadLoading || !rcSigHasInk}
               >
                 {rcSignature?.shipperSignedAt ? 'Shipper Signed' : signing ? 'Signing…' : 'Sign RC (Shipper)'}
               </button>
@@ -258,6 +329,30 @@ export default function LoadDetailsModal({ load, onClose }) {
               <Info label="Shipper Signed" value={rcSignature?.shipperSignedAt ? 'Yes' : 'No'} />
               <Info label="Carrier Signed" value={rcSignature?.carrierSignedAt ? 'Yes' : 'No'} />
             </div>
+
+            {!rcSignature?.shipperSignedAt && (
+              <div style={{ marginTop: 12 }}>
+                <div className="muted" style={{ fontSize: 13, marginBottom: 8 }}>Signature (draw)</div>
+                <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                  <div>
+                    <canvas
+                      ref={rcSigCanvasRef}
+                      onPointerDown={rcSigPointerDown}
+                      onPointerMove={rcSigPointerMove}
+                      onPointerUp={rcSigPointerUp}
+                      onPointerLeave={rcSigPointerUp}
+                      style={{ background: '#ffffff', borderRadius: 10, border: '1px solid #e5e7eb', touchAction: 'none' }}
+                    />
+                    <div className="muted" style={{ marginTop: 6, fontSize: 12 }}>
+                      {rcSigHasInk ? 'Signature captured.' : 'Draw your signature in the box.'}
+                    </div>
+                  </div>
+                  <button className="btn small ghost-cd" type="button" onClick={clearRcSig}>
+                    Clear
+                  </button>
+                </div>
+              </div>
+            )}
           </section>
 
           <section style={{ border: '1px solid #e5e7eb', borderRadius: 10, padding: 12 }}>

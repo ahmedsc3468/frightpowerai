@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import '../../styles/carrier/MyLoads.css';
 import AddLoads from './AddLoads';
-import { API_URL } from '../../config';
 import { auth } from '../../firebase';
+import { clearCarrierLoadsCache, getCarrierLoads } from '../../api/loads';
 
 // Map backend statuses to columns
 const statusToColumn = {
@@ -174,7 +174,7 @@ export default function MyLoads() {
     fetchLoads();
   }, []);
 
-  const fetchLoads = async () => {
+  const fetchLoads = async (forceFresh = false) => {
     setIsLoading(true);
     setError(null);
     
@@ -183,19 +183,16 @@ export default function MyLoads() {
       if (!user) {
         throw new Error('Not authenticated');
       }
-      
-      const token = await user.getIdToken();
-      const response = await fetch(`${API_URL}/loads?page_size=200&exclude_drafts=false`, {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
 
-      if (!response.ok) {
-        throw new Error('Failed to fetch loads');
+      if (forceFresh) {
+        clearCarrierLoadsCache();
       }
 
-      const data = await response.json();
+      const data = await getCarrierLoads({
+        pageSize: 200,
+        excludeDrafts: false,
+        cacheMs: forceFresh ? 0 : 15000,
+      });
       
       // Group loads by status into columns
       const grouped = {
@@ -209,7 +206,7 @@ export default function MyLoads() {
         settled: []
       };
 
-      data.loads.forEach(load => {
+      (data?.loads || []).forEach(load => {
         // Determine proper status flag based on driver assignment and load status
         let statusFlag = 'unassigned';
         let column = 'tendered'; // All loads go to tendered by default
@@ -283,7 +280,7 @@ export default function MyLoads() {
 
   const handleLoadAdded = () => {
     // Refresh loads after adding new one
-    fetchLoads();
+    fetchLoads(true);
     setShowAddLoads(false);
     setResumeLoad(null); // Clear resume state
   };

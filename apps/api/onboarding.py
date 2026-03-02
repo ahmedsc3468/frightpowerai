@@ -20,6 +20,160 @@ from .models import (
 router = APIRouter(prefix="/onboarding", tags=["Onboarding"])
 
 
+def _parse_onboarding_data(user: Dict[str, Any]) -> Dict[str, Any]:
+    onboarding_data_str = user.get("onboarding_data")
+    if not onboarding_data_str:
+        return {}
+    if isinstance(onboarding_data_str, dict):
+        return onboarding_data_str
+    if not isinstance(onboarding_data_str, str):
+        return {}
+    try:
+        parsed = json.loads(onboarding_data_str)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _has_w9_document(onboarding_data: Dict[str, Any]) -> bool:
+    try:
+        raw_docs = onboarding_data.get("documents")
+        if not isinstance(raw_docs, list):
+            return False
+        for d in raw_docs:
+            if not isinstance(d, dict):
+                continue
+
+            # Support multiple storage shapes.
+            dt = (
+                d.get("doc_type")
+                or d.get("type")
+                or (d.get("extracted_fields", {}) or {}).get("document_type")
+            )
+            dt_s = str(dt or "").strip().upper()
+            if not dt_s:
+                continue
+            if "W9" in dt_s:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def _missing_shipper_items(user: Dict[str, Any]) -> Dict[str, List[str]]:
+    # Core fields that should block onboarding completion.
+    required_fields = [
+        "company_name",
+        "business_type",
+        "tax_id",
+        "address",
+        "phone",
+        "name",
+    ]
+
+    # Additional onboarding fields that are helpful but not strictly required to mark onboarding complete.
+    optional_fields = [
+        "contact_title",
+        "website",
+    ]
+
+    missing_required_fields: List[str] = []
+    for key in required_fields:
+        v = user.get(key)
+        if v is None:
+            missing_required_fields.append(key)
+            continue
+        if isinstance(v, str) and not v.strip():
+            missing_required_fields.append(key)
+            continue
+        if v == "":
+            missing_required_fields.append(key)
+
+    missing_optional_fields: List[str] = []
+    for key in optional_fields:
+        v = user.get(key)
+        if v is None:
+            missing_optional_fields.append(key)
+            continue
+        if isinstance(v, str) and not v.strip():
+            missing_optional_fields.append(key)
+            continue
+        if v == "":
+            missing_optional_fields.append(key)
+
+    onboarding_data = _parse_onboarding_data(user)
+    missing_documents: List[str] = []
+    if not _has_w9_document(onboarding_data):
+        missing_documents.append("w9")
+
+    return {
+        "missing_required_fields": missing_required_fields,
+        "missing_optional_fields": missing_optional_fields,
+        "missing_documents": missing_documents,
+    }
+
+
+@router.get("/shipper/missing")
+async def get_shipper_missing_items(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    """Return missing onboarding items for a shipper/broker.
+
+    Used by Shipper Profile to render a dynamic onboarding completion modal.
+    """
+
+    role = str(user.get("role") or "").strip().lower()
+    if role not in {"shipper", "broker"}:
+        raise HTTPException(status_code=403, detail="Only shippers/brokers can access this endpoint")
+
+    missing = _missing_shipper_items(user)
+    return {
+        "missing_required_fields": missing.get("missing_required_fields", []),
+        "missing_optional_fields": missing.get("missing_optional_fields", []),
+        "missing_documents": missing.get("missing_documents", []),
+        "onboarding_completed": bool(user.get("onboarding_completed", False)),
+    }
+
+
+@router.post("/shipper/complete")
+async def complete_shipper_onboarding(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    """Mark shipper onboarding completed if (and only if) nothing required is missing."""
+
+    role = str(user.get("role") or "").strip().lower()
+    if role not in {"shipper", "broker"}:
+        raise HTTPException(status_code=403, detail="Only shippers/brokers can access this endpoint")
+
+    missing = _missing_shipper_items(user)
+    missing_fields = missing.get("missing_required_fields", [])
+    missing_documents = missing.get("missing_documents", [])
+    if missing_fields or missing_documents:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Onboarding is not complete",
+                "missing_required_fields": missing_fields,
+                "missing_optional_fields": missing.get("missing_optional_fields", []),
+                "missing_documents": missing_documents,
+            },
+        )
+
+    uid = user.get("uid")
+    if not uid:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    try:
+        db.collection("users").document(str(uid)).set(
+            {
+                "onboarding_completed": True,
+                "onboarding_step": "COMPLETED",
+                "updated_at": time.time(),
+            },
+            merge=True,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to complete onboarding: {str(e)}")
+
+    return {"ok": True, "onboarding_completed": True}
+
+
 def _pref_enabled(*, user: Dict[str, Any], uid: str, key: str, default: bool = True) -> bool:
     """Best-effort read of a user's notification preference.
 
@@ -837,6 +991,8 @@ async def get_documents(
     try:
         uid = user['uid']
         
+        from .database import signed_download_url
+
         documents = []
         onboarding_data_str = user.get("onboarding_data", "{}")
         
@@ -854,6 +1010,9 @@ async def get_documents(
                         status = calculate_document_status(expiry_date)
                     
                     doc_type = doc.get("extracted_fields", {}).get("document_type", "Unknown")
+
+                    sp = str(doc.get("storage_path") or "").strip()
+                    signed_url = signed_download_url(sp, filename=doc.get("filename"), disposition="attachment") if sp else None
                     
                     documents.append({
                         "id": doc.get("doc_id", ""),
@@ -863,6 +1022,7 @@ async def get_documents(
                         "status": status,
                         "expiry_date": expiry_date,
                         "uploaded_at": doc.get("uploaded_at", ""),
+                        "download_url": signed_url,
                         "extracted_fields": doc.get("extracted_fields", {}),
                         "missing_fields": doc.get("missing", []),
                         "warnings": []

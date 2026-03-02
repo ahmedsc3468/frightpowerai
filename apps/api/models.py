@@ -82,11 +82,21 @@ class ProfileUpdate(BaseModel):
     utc_offset_minutes: Optional[int] = None
     trusted_devices_enabled: Optional[bool] = None
 
+    # Shipper/Broker business profile fields
+    business_type: Optional[str] = None
+    freight_type: Optional[str] = None
+    regions_of_operation: Optional[str] = None
+
+    # Shipper/Broker onboarding/profile fields
+    tax_id: Optional[str] = None
+    website: Optional[str] = None
+    contact_title: Optional[str] = None
+
 
 class UserSettings(BaseModel):
     language: Optional[str] = None
     time_zone: Optional[str] = None
-    date_format: str = "mdy"  # mdy | dmy
+    date_format: str = "mdy"  # mdy | dmy | ymd
     start_dashboard_view: str = "dashboard"
     auto_save_edits: bool = True
     email_digest_enabled: bool = True
@@ -150,6 +160,16 @@ class UserProfile(BaseModel):
     gps_lng: Optional[float] = None
     utc_offset_minutes: Optional[int] = None
     trusted_devices_enabled: Optional[bool] = None
+
+    # Shipper/Broker business profile fields
+    business_type: Optional[str] = None
+    freight_type: Optional[str] = None
+    regions_of_operation: Optional[str] = None
+
+    # Shipper/Broker onboarding/profile fields
+    tax_id: Optional[str] = None
+    website: Optional[str] = None
+    contact_title: Optional[str] = None
 
 # --- 3. Chat Models (Reference Enums above) ---
 
@@ -362,6 +382,15 @@ class LoadComplete(BaseModel):
     driver_assignment_status: Optional[str] = None  # pending, accepted, rejected
     offers: Optional[List[Dict[str, Any]]] = None
     offers_count: Optional[int] = None
+
+    # Workflow timestamps (epoch seconds)
+    picked_up_at: Optional[float] = None
+    delivered_at: Optional[float] = None
+    pod_submitted_at: Optional[float] = None
+    completed_at: Optional[float] = None
+
+    # Derived performance fields
+    on_time: Optional[bool] = None
     
     # Step 1: Route & Equipment
     origin: str

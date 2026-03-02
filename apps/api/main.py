@@ -59,6 +59,7 @@ from .scheduler import SchedulerWrapper
 from .finance import router as finance_router, init_finance_scheduler
 from .load_documents import router as load_documents_router, create_load_document_from_url, ensure_rate_confirmation_document
 from .load_workflow import router as load_workflow_router
+from .load_record import router as load_record_router
 from .load_ownership import normalized_fields_for_new_load, normalized_ownership_patch_for_load
 from .load_workflow_utils import is_rate_con_carrier_signed, notify_previous_carriers_new_load, sanitize_load_for_viewer
 from .consents import router as consents_router
@@ -2193,6 +2194,7 @@ async def list_documents(user: dict = Depends(get_current_user)):
     Returns the list of documents from user's onboarding with status.
     """
     from .onboarding import calculate_document_status
+    from .database import signed_download_url
     
     uid = user['uid']
     documents = []
@@ -2215,6 +2217,10 @@ async def list_documents(user: dict = Depends(get_current_user)):
                     status = calculate_document_status(expiry_date)
                 
                 doc_type = doc.get("extracted_fields", {}).get("document_type", "Unknown")
+
+                # Prefer fresh signed URL when we have a storage_path.
+                sp = str(doc.get("storage_path") or "").strip()
+                signed_url = signed_download_url(sp, filename=doc.get("filename"), disposition="attachment") if sp else None
                 
                 documents.append({
                     "id": doc.get("doc_id", ""),
@@ -2224,7 +2230,7 @@ async def list_documents(user: dict = Depends(get_current_user)):
                     "status": status,
                     "expiry_date": expiry_date,
                     "uploaded_at": doc.get("uploaded_at", ""),
-                    "download_url": doc.get("download_url", ""),
+                    "download_url": signed_url or doc.get("download_url", ""),
                     "extracted_fields": doc.get("extracted_fields", {}),
                     "missing_fields": doc.get("missing", []),
                     "warnings": []
@@ -2297,13 +2303,10 @@ async def download_documents_package(user: Dict[str, Any] = Depends(get_current_
                     print(f"[documents/package.zip] failed download {storage_path}: {e}")
 
             if data is None:
-                url = doc.get("download_url") or doc.get("file_url")
-                if url:
-                    try:
-                        with urllib.request.urlopen(url, timeout=20) as resp:
-                            data = resp.read()
-                    except Exception as e:
-                        print(f"[documents/package.zip] failed fetch url: {e}")
+                # SECURITY: do not fetch arbitrary URLs from user-controlled metadata.
+                # This prevents SSRF/exfiltration vectors (e.g. pointing download_url at internal services).
+                # If a document has no storage_path, it will be skipped.
+                pass
 
             if data is None:
                 continue
@@ -2340,6 +2343,19 @@ async def list_trip_documents(user: Dict[str, Any] = Depends(get_current_user)):
             docs.sort(key=lambda d: float((d or {}).get("uploaded_at") or 0), reverse=True)
         except Exception:
             pass
+        # Replace stored URLs with short-lived signed URLs (when storage_path is available).
+        try:
+            from .database import signed_download_url
+
+            for d in docs:
+                if not isinstance(d, dict):
+                    continue
+                sp = str(d.get("storage_path") or "").strip()
+                if sp:
+                    d["download_url"] = signed_download_url(sp, filename=d.get("filename"), disposition="attachment")
+        except Exception:
+            pass
+
         return {"documents": docs, "total": len(docs)}
     except Exception as e:
         print(f"Error fetching trip documents: {e}")
@@ -2375,8 +2391,12 @@ async def upload_trip_document(
     try:
         blob = bucket.blob(storage_path)
         blob.upload_from_string(data, content_type=content_type)
-        blob.make_public()
-        download_url = blob.public_url
+        try:
+            from .database import signed_download_url
+
+            download_url = signed_download_url(storage_path, filename=filename, disposition="attachment")
+        except Exception:
+            download_url = None
         print(f"✅ Trip doc uploaded to Firebase Storage: {storage_path}")
     except Exception as e:
         print(f"❌ Error uploading trip doc to Firebase Storage: {e}")
@@ -2711,8 +2731,12 @@ async def upload_document(
     try:
         blob = bucket.blob(storage_path)
         blob.upload_from_string(data, content_type=content_type)
-        blob.make_public()
-        download_url = blob.public_url
+        try:
+            from .database import signed_download_url
+
+            download_url = signed_download_url(storage_path, filename=file.filename, disposition="attachment")
+        except Exception:
+            download_url = None
         print(f"✅ File uploaded to Firebase Storage: {storage_path}")
     except Exception as e:
         error_msg = str(e)
@@ -2913,37 +2937,6 @@ def get_document(document_id: str, user: dict = Depends(get_current_user)):
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
     return doc
-
-
-@app.get("/documents")
-async def list_user_documents(user: Dict[str, Any] = Depends(get_current_user)):
-    """Get all documents for the current user from Firebase."""
-    try:
-        uid = user['uid']
-        user_ref = db.collection("users").document(uid)
-        user_doc = user_ref.get()
-        
-        if not user_doc.exists:
-            return {"documents": []}
-        
-        user_data = user_doc.to_dict()
-        onboarding_data_str = user_data.get("onboarding_data", "{}")
-        
-        # Parse onboarding data
-        try:
-            onboarding_data = json.loads(onboarding_data_str) if isinstance(onboarding_data_str, str) else onboarding_data_str
-        except:
-            onboarding_data = {}
-        
-        documents = onboarding_data.get("documents", [])
-        
-        return {
-            "documents": documents,
-            "total": len(documents)
-        }
-    except Exception as e:
-        print(f"Error fetching documents: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch documents: {str(e)}")
 
 
 # --- RAG CHAT ENDPOINT (Logged In) ---
@@ -4179,6 +4172,43 @@ async def list_loads(
             except Exception:
                 return None
 
+        def _parse_delivery_deadline_ts(v: Any) -> Optional[float]:
+            """Parse delivery_date into an epoch-seconds deadline.
+
+            Supports:
+            - epoch seconds (int/float)
+            - ISO/date strings (YYYY-MM-DD or full ISO)
+            """
+            try:
+                if v is None:
+                    return None
+                if isinstance(v, (int, float)):
+                    ts = float(v)
+                    return ts if ts > 0 else None
+                s = str(v).strip()
+                if not s:
+                    return None
+
+                # Common case: YYYY-MM-DD
+                try:
+                    if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+                        from datetime import datetime
+                        dt = datetime.fromisoformat(s[:10])
+                        # Treat as end-of-day local deadline.
+                        return dt.replace(hour=23, minute=59, second=59, microsecond=0).timestamp()
+                except Exception:
+                    pass
+
+                # Fallback: full ISO
+                try:
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                    return dt.timestamp()
+                except Exception:
+                    return None
+            except Exception:
+                return None
+
         # Normalize common legacy key variants
         if "equipment_type" not in out and "equipmentType" in out:
             out["equipment_type"] = out.get("equipmentType")
@@ -4221,6 +4251,40 @@ async def list_loads(
 
         if not isinstance(out.get("metadata"), dict):
             out["metadata"] = {}
+
+        # Map distance fields (older docs sometimes store miles/distance_miles).
+        if out.get("estimated_distance") in (None, 0, 0.0, ""):
+            est = _to_float(out.get("estimated_distance"))
+            if not est:
+                est = _to_float(out.get("distance_miles")) or _to_float(out.get("miles"))
+            if est:
+                out["estimated_distance"] = float(est)
+
+        # Compute total_rate when absent (best-effort).
+        if out.get("total_rate") in (None, 0, 0.0, ""):
+            linehaul = _to_float(out.get("linehaul_rate")) or 0.0
+            fuel = _to_float(out.get("fuel_surcharge")) or 0.0
+            extras_sum = 0.0
+            try:
+                extras = out.get("advanced_charges")
+                if isinstance(extras, list):
+                    for it in extras:
+                        if isinstance(it, dict):
+                            extras_sum += float(_to_float(it.get("amount")) or 0.0)
+            except Exception:
+                pass
+            total = float(linehaul) + float(fuel) + float(extras_sum)
+            if total > 0:
+                out["total_rate"] = total
+
+        # Compute on_time when we can.
+        try:
+            delivered_at = _to_float(out.get("delivered_at"))
+            deadline_ts = _parse_delivery_deadline_ts(out.get("delivery_date"))
+            if delivered_at and deadline_ts and out.get("on_time") is None:
+                out["on_time"] = bool(float(delivered_at) <= float(deadline_ts))
+        except Exception:
+            pass
 
         return out
 
@@ -4590,26 +4654,41 @@ async def get_load_details(
             )
     elif user_role == "driver":
         # Drivers can ONLY view loads assigned to them
-        if load.get("assigned_driver") != uid:
+        assigned_driver_uid = (
+            load.get("assigned_driver")
+            or load.get("assigned_driver_id")
+            or load.get("driver_id")
+        )
+        if str(assigned_driver_uid or "").strip() != str(uid or "").strip():
             raise HTTPException(
                 status_code=403,
                 detail="Drivers can only view loads assigned to them"
             )
     else:
-        # Carriers can view their own loads OR marketplace loads (POSTED loads they can bid on)
-        if load.get("created_by") != uid:
+        # Carriers: can view loads assigned to them, plus marketplace POSTED loads for bidding.
+        carrier_uid = str(uid or "").strip()
+        assigned_carrier_uid = (
+            load.get("assigned_carrier")
+            or load.get("assigned_carrier_id")
+            or load.get("carrier_id")
+            or load.get("carrier_uid")
+        )
+        is_assigned = str(assigned_carrier_uid or "").strip() == carrier_uid
+
+        if not is_assigned:
             # Allow carriers to view POSTED loads (marketplace loads) for bidding
-            if load.get("status") != LoadStatus.POSTED.value:
+            if str(load.get("status") or "").strip().lower() != str(LoadStatus.POSTED.value).strip().lower():
                 raise HTTPException(
                     status_code=403,
                     detail="Not authorized to view this load"
                 )
-            # Also check if carrier has already bid on this load (for viewing their bid)
+
             offers = load.get("offers", [])
-            has_bid = any(o.get("carrier_id") == uid for o in offers)
-            # Allow viewing if it's a POSTED load (marketplace) or if they have a bid
-            if not has_bid and load.get("status") == LoadStatus.POSTED.value:
-                # This is a marketplace load, allow viewing for bidding purposes
+            if not isinstance(offers, list):
+                offers = []
+            has_bid = any(str((o or {}).get("carrier_id") or "").strip() == carrier_uid for o in offers if isinstance(o, dict))
+            # If it's POSTED, allow viewing even without a bid.
+            if not has_bid:
                 pass
     
     sanitized = sanitize_load_for_viewer(load, viewer_uid=str(uid), viewer_role=str(user_role))
@@ -8626,6 +8705,7 @@ app.include_router(messaging_router)
 app.include_router(finance_router)
 app.include_router(load_documents_router)
 app.include_router(load_workflow_router)
+app.include_router(load_record_router)
 app.include_router(consents_router)
 app.include_router(calendar_router)
 app.include_router(help_center_router)
@@ -8633,11 +8713,22 @@ app.include_router(help_center_router)
 @app.on_event("startup")
 def startup_events():
     # Build/refresh the embedded KB index (includes Help Center docs under data/kb).
-    # This is required for semantic search and the Help Center AI context.
+    # This can take a while on first run (fastembed model download/init), so do it
+    # asynchronously to avoid blocking the API from starting.
     try:
-        bootstrap_knowledge_base(store)
+        import threading
+
+        def _kb_bootstrap_worker():
+            try:
+                bootstrap_knowledge_base(store)
+                print("[KB] bootstrap complete")
+            except Exception as e:
+                print(f"[KB] bootstrap failed: {e}")
+
+        threading.Thread(target=_kb_bootstrap_worker, daemon=True).start()
+        print("[KB] bootstrap started (async)")
     except Exception as e:
-        print(f"[KB] bootstrap failed: {e}")
+        print(f"[KB] bootstrap thread setup failed: {e}")
 
     scheduler.start()
     init_finance_scheduler(scheduler)

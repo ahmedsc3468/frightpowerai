@@ -11,7 +11,14 @@ def main():
         host=settings.APP_HOST,
         port=settings.APP_PORT,
         reload=True,
-        reload_dirs=["apps"],
+        # On Windows, watching the whole `apps/` directory can cause the reloader
+        # to churn through `apps/venv/` and appear to hang.
+        reload_dirs=["apps/api"],
+        reload_excludes=[
+            "apps/venv/*",
+            "apps/venv/**",
+            "**/__pycache__/**",
+        ],
     )
 
 

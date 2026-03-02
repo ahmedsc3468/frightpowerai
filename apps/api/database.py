@@ -2,6 +2,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore, storage
 import os
 from typing import Any, Dict
+from datetime import timedelta
 
 # Initialize Firebase only once
 if not firebase_admin._apps:
@@ -19,6 +20,42 @@ if not firebase_admin._apps:
 
 db = firestore.client()
 bucket = storage.bucket()
+
+
+def signed_download_url(
+    storage_path: str,
+    *,
+    filename: str | None = None,
+    disposition: str = "attachment",
+    ttl_seconds: int = 15 * 60,
+) -> str | None:
+    """Generate a short-lived signed download URL for a storage object.
+
+    This avoids making objects public while still allowing browsers to download
+    without attaching auth headers.
+    """
+
+    path = str(storage_path or "").strip()
+    if not path:
+        return None
+
+    try:
+        blob = bucket.blob(path)
+        safe_name = None
+        if filename:
+            safe_name = str(filename).replace("\n", " ").replace("\r", " ").replace('"', "'").strip() or None
+
+        kwargs: Dict[str, Any] = {
+            "expiration": timedelta(seconds=int(ttl_seconds)),
+            "method": "GET",
+            "version": "v4",
+        }
+        if safe_name:
+            kwargs["response_disposition"] = f"{disposition}; filename=\"{safe_name}\""
+
+        return blob.generate_signed_url(**kwargs)
+    except Exception:
+        return None
 
 # Helper to log actions
 def log_action(user_id: str, action: str, details: str, ip: str = None):

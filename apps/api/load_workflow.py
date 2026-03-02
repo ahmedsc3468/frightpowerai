@@ -57,6 +57,7 @@ class PrivateDetailsUpdate(BaseModel):
 
 class RateConSignRequest(BaseModel):
     signer_name: Optional[str] = None
+    signature_data_url: Optional[str] = Field(default=None, min_length=20, description="data:image/png;base64,...")
 
 
 class DeliveryCompleteRequest(BaseModel):
@@ -113,7 +114,16 @@ def _require_shipper_owner(load: Dict[str, Any], user: Dict[str, Any]) -> None:
         raise HTTPException(status_code=403, detail="Only shipper/broker can perform this action")
     if role in {"admin", "super_admin"}:
         return
-    if str(load.get("created_by") or "").strip() != uid:
+
+    # Support legacy fields used by older load documents.
+    owner_uids = {
+        str(load.get("created_by") or "").strip(),
+        str(load.get("createdBy") or "").strip(),
+        str(load.get("payer_uid") or "").strip(),
+        str(load.get("payerUid") or "").strip(),
+    }
+    owner_uids.discard("")
+    if uid not in owner_uids:
         raise HTTPException(status_code=403, detail="You can only modify loads you created")
 
 
@@ -124,7 +134,13 @@ def _require_assigned_carrier(load: Dict[str, Any], user: Dict[str, Any]) -> Non
         raise HTTPException(status_code=403, detail="Only carrier can perform this action")
     if role in {"admin", "super_admin"}:
         return
-    assigned = str(load.get("assigned_carrier") or load.get("assigned_carrier_id") or load.get("carrier_id") or "").strip()
+    assigned = str(
+        load.get("assigned_carrier")
+        or load.get("assigned_carrier_id")
+        or load.get("carrier_id")
+        or load.get("carrier_uid")
+        or ""
+    ).strip()
     if not assigned or assigned != uid:
         raise HTTPException(status_code=403, detail="Load is not assigned to your carrier")
 
@@ -252,7 +268,8 @@ async def driver_complete_pickup(
         pass
 
     # Must be assigned to this driver.
-    if str(load.get("assigned_driver") or load.get("assigned_driver_id") or "").strip() != str(user.get("uid") or "").strip():
+    assigned_driver_uid = str(load.get("assigned_driver") or load.get("assigned_driver_id") or load.get("driver_id") or "").strip()
+    if assigned_driver_uid != str(user.get("uid") or "").strip():
         raise HTTPException(status_code=403, detail="Load is not assigned to you")
 
     # Minimal state-machine guard: if this load uses contract workflow, require carrier signature before pickup.
@@ -301,32 +318,34 @@ async def driver_complete_pickup(
     if not eta_ok:
         raise HTTPException(status_code=400, detail=f"Pickup ETA check failed: pickup time differs by {eta_diff_hours:.1f}h")
 
-    # Ensure there is a BOL document (or create one from provided photo URL).
+    # Ensure there is a BOL document.
     try:
         bol_exists = False
         for d in list_load_documents(load_id):
-            if str(d.get("kind") or "").strip().upper() == "BOL":
+            if str(d.get("kind") or "").strip().upper() != "BOL":
+                continue
+            # Accept either a URL (legacy/public) or a storage_path (private/signed).
+            if str(d.get("url") or "").strip() or str(d.get("storage_path") or "").strip():
                 bol_exists = True
                 break
-        if not bol_exists and req.bol_photo_url:
-            create_load_document_from_url(load=load, kind="BOL", url=req.bol_photo_url, actor=user, source="pickup")
-            bol_exists = True
         if not bol_exists:
             raise HTTPException(status_code=400, detail="BOL is required before completing pickup")
     except HTTPException:
         raise
-    except Exception:
-        # If doc listing fails, don't block pickup; signature + status still proceed.
-        pass
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to verify BOL document: {e}")
 
-    # Upload shipper/warehouse signature as a document.
+    # Upload shipper/warehouse signature as a document (required).
     try:
         raw, content_type = decode_data_url_base64(req.shipper_signature_data_url)
-        ext = "png" if "png" in (content_type or "").lower() else "bin"
-        filename = f"bol_signature_{load_id}_{int(picked_up_ts)}.{ext}"
-        upload_load_document_bytes(load=load, kind="BOL_SIGNATURE", filename=filename, data=raw, actor=user, source="pickup")
     except Exception:
-        pass
+        raise HTTPException(status_code=400, detail="Invalid shipper_signature_data_url")
+
+    ext = "png" if "png" in (content_type or "").lower() else "bin"
+    filename = f"bol_signature_{load_id}_{int(picked_up_ts)}.{ext}"
+    sig_doc = upload_load_document_bytes(load=load, kind="BOL_SIGNATURE", filename=filename, data=raw, actor=user, source="pickup")
+    if not sig_doc or not sig_doc.get("doc_id") or (not sig_doc.get("url") and not sig_doc.get("storage_path")):
+        raise HTTPException(status_code=500, detail="Failed to store pickup signature document")
 
     updates = {
         "status": "in_transit",
@@ -381,29 +400,69 @@ async def shipper_sign_rate_confirmation(
     _require_shipper_owner(load, user)
 
     # Must be awarded to a carrier first.
-    assigned = str(load.get("assigned_carrier") or load.get("assigned_carrier_id") or "").strip()
+    assigned = str(load.get("assigned_carrier") or load.get("assigned_carrier_id") or load.get("carrier_id") or load.get("carrier_uid") or "").strip()
     if not assigned:
         raise HTTPException(status_code=400, detail="Load is not awarded to a carrier yet")
 
-    # Ensure a RC document exists (best-effort).
+    if not req.signature_data_url:
+        raise HTTPException(status_code=400, detail="signature_data_url is required")
+
+    # Ensure an RC document exists. If the only RC is auto-generated, regenerate it so
+    # the template stays current. If the shipper uploaded a custom RC, keep it.
+    force_regen = True
     try:
-        rc_doc = ensure_rate_confirmation_document(load_id=load_id, shipper=user)
-        if rc_doc and rc_doc.get("doc_id"):
-            try:
-                db.collection("loads").document(str(load_id)).set(
-                    {"rate_confirmation_doc_id": rc_doc.get("doc_id"), "rate_confirmation_url": rc_doc.get("url")},
-                    merge=True,
-                )
-            except Exception:
-                pass
+        for d in list_load_documents(load_id):
+            if str(d.get("kind") or "").strip().upper() != "RATE_CONFIRMATION":
+                continue
+            src = str(d.get("source") or "").strip().lower()
+            url = str(d.get("url") or "").strip()
+            if src and src != "generated" and url:
+                force_regen = False
+                break
     except Exception:
-        rc_doc = None
+        force_regen = True
+
+    try:
+        rc_doc = ensure_rate_confirmation_document(load_id=load_id, shipper=user, force_regenerate=force_regen)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate rate confirmation: {e}")
+
+    if not rc_doc or not rc_doc.get("doc_id") or (not rc_doc.get("url") and not rc_doc.get("storage_path")):
+        raise HTTPException(status_code=500, detail="Failed to generate/store rate confirmation document")
+
+    try:
+        db.collection("loads").document(str(load_id)).set(
+            {"rate_confirmation_doc_id": rc_doc.get("doc_id"), "rate_confirmation_url": rc_doc.get("url")},
+            merge=True,
+        )
+    except Exception:
+        # Non-fatal: the RC doc is still in the load vault.
+        pass
+
+    try:
+        raw, content_type = decode_data_url_base64(req.signature_data_url)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid signature_data_url")
+
+    ext = "png" if "png" in (content_type or "").lower() else "bin"
+    filename = f"rate_con_signature_shipper_{load_id}_{int(now_ts())}.{ext}"
+    signature_doc = upload_load_document_bytes(
+        load=load,
+        kind="RATE_CONFIRMATION_SIGNATURE_SHIPPER",
+        filename=filename,
+        data=raw,
+        actor=user,
+        source="rate_con_sign",
+    )
+    if not signature_doc or not signature_doc.get("doc_id") or (not signature_doc.get("url") and not signature_doc.get("storage_path")):
+        raise HTTPException(status_code=500, detail="Failed to store shipper signature document")
 
     contract = set_contract_rate_con_signature(
         load=load,
         signer_role=str(user.get("role")),
         signer_uid=str(user.get("uid")),
         signer_name=req.signer_name,
+        signature_doc=signature_doc,
     )
 
     ts = now_ts()
@@ -416,7 +475,7 @@ async def shipper_sign_rate_confirmation(
 
     log_action(str(user.get("uid")), "RATE_CON_SIGN_SHIPPER", f"Load {load_id}: shipper signed rate confirmation")
 
-    return {"success": True, "load_id": load_id, "contract": contract, "rate_confirmation": rc_doc}
+    return {"success": True, "load_id": load_id, "contract": contract, "rate_confirmation": rc_doc, "shipper_signature": signature_doc}
 
 
 @router.post("/loads/{load_id}/rate-confirmation/carrier-sign")
@@ -437,11 +496,33 @@ async def carrier_sign_rate_confirmation(
     if is_rate_con_carrier_signed(load):
         return {"success": True, "load_id": load_id, "message": "Carrier already signed"}
 
+    if not req.signature_data_url:
+        raise HTTPException(status_code=400, detail="signature_data_url is required")
+
+    try:
+        raw, content_type = decode_data_url_base64(req.signature_data_url)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid signature_data_url")
+
+    ext = "png" if "png" in (content_type or "").lower() else "bin"
+    filename = f"rate_con_signature_carrier_{load_id}_{int(now_ts())}.{ext}"
+    signature_doc = upload_load_document_bytes(
+        load=load,
+        kind="RATE_CONFIRMATION_SIGNATURE_CARRIER",
+        filename=filename,
+        data=raw,
+        actor=user,
+        source="rate_con_sign",
+    )
+    if not signature_doc or not signature_doc.get("doc_id") or (not signature_doc.get("url") and not signature_doc.get("storage_path")):
+        raise HTTPException(status_code=500, detail="Failed to store carrier signature document")
+
     contract = set_contract_rate_con_signature(
         load=load,
         signer_role="carrier",
         signer_uid=str(user.get("uid")),
         signer_name=req.signer_name,
+        signature_doc=signature_doc,
     )
 
     ts = now_ts()
@@ -463,7 +544,7 @@ async def carrier_sign_rate_confirmation(
 
     log_action(str(user.get("uid")), "RATE_CON_SIGN_CARRIER", f"Load {load_id}: carrier signed rate confirmation")
 
-    return {"success": True, "load_id": load_id, "contract": contract}
+    return {"success": True, "load_id": load_id, "contract": contract, "carrier_signature": signature_doc}
 
 
 @router.post("/loads/{load_id}/delivery/complete")
@@ -494,7 +575,8 @@ async def driver_complete_delivery(
         pass
 
     # Must be assigned to this driver.
-    if str(load.get("assigned_driver") or load.get("assigned_driver_id") or "").strip() != str(user.get("uid") or "").strip():
+    assigned_driver_uid = str(load.get("assigned_driver") or load.get("assigned_driver_id") or load.get("driver_id") or "").strip()
+    if assigned_driver_uid != str(user.get("uid") or "").strip():
         raise HTTPException(status_code=403, detail="Load is not assigned to you")
 
     # Minimal state-machine guard: delivery should come after pickup/in-transit.
@@ -533,6 +615,23 @@ async def driver_complete_delivery(
     if not eta_ok:
         raise HTTPException(status_code=400, detail=f"ETA check failed: delivery time differs by {eta_diff_hours:.1f}h")
 
+    # Require a POD document (PDF/image) be uploaded before completing delivery.
+    try:
+        pod_exists = False
+        for d in list_load_documents(load_id):
+            if str(d.get("kind") or "").strip().upper() != "POD":
+                continue
+            # Accept either a URL (legacy/public) or a storage_path (private/signed).
+            if str(d.get("url") or "").strip() or str(d.get("storage_path") or "").strip():
+                pod_exists = True
+                break
+        if not pod_exists:
+            raise HTTPException(status_code=400, detail="POD is required before completing delivery")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to verify POD document: {e}")
+
     # Create ePOD record
     epod_id = str(uuid.uuid4())
     epod = {
@@ -552,21 +651,22 @@ async def driver_complete_delivery(
         "created_at": delivered_ts,
     }
 
-    # Attach the receiver signature into the document vault as a POD artifact (image).
+    # Attach the receiver signature into the document vault as a POD artifact (image) (required).
     try:
         raw, content_type = decode_data_url_base64(req.receiver_signature_data_url)
-        ext = "png" if "png" in (content_type or "").lower() else "bin"
-        filename = f"pod_signature_{epod_id}.{ext}"
-        record = upload_load_document_bytes(load=load, kind="POD_SIGNATURE", filename=filename, data=raw, actor=user, source="epod")
-        if record and record.get("url"):
-            epod["receiver_signature"] = {
-                "doc_id": record.get("doc_id"),
-                "url": record.get("url"),
-                "content_type": content_type,
-            }
     except Exception:
-        # Do not fail the delivery completion if signature upload fails.
-        pass
+        raise HTTPException(status_code=400, detail="Invalid receiver_signature_data_url")
+
+    ext = "png" if "png" in (content_type or "").lower() else "bin"
+    filename = f"pod_signature_{epod_id}.{ext}"
+    record = upload_load_document_bytes(load=load, kind="POD_SIGNATURE", filename=filename, data=raw, actor=user, source="epod")
+    if not record or not record.get("doc_id") or (not record.get("url") and not record.get("storage_path")):
+        raise HTTPException(status_code=500, detail="Failed to store receiver signature document")
+    epod["receiver_signature"] = {
+        "doc_id": record.get("doc_id"),
+        "url": record.get("url"),
+        "content_type": content_type,
+    }
 
     updates = {
         "status": "delivered",
@@ -592,8 +692,8 @@ async def driver_complete_delivery(
 
     # Notify shipper + carrier (in-app notification)
     try:
-        shipper_uid = str(load.get("created_by") or "").strip() or None
-        carrier_uid = str(load.get("assigned_carrier") or load.get("assigned_carrier_id") or "").strip() or None
+        shipper_uid = str(load.get("created_by") or load.get("payer_uid") or load.get("createdBy") or "").strip() or None
+        carrier_uid = str(load.get("assigned_carrier") or load.get("assigned_carrier_id") or load.get("carrier_id") or load.get("carrier_uid") or "").strip() or None
         ts_i = int(now_ts())
         for target_uid, ntype in [(shipper_uid, "pod_submitted"), (carrier_uid, "pod_submitted")]:
             if not target_uid:
@@ -644,6 +744,7 @@ async def carrier_create_invoice(
 
     invoice = {
         "invoice_id": invoice_id,
+        "invoice_number": f"INV{load_id}",
         "load_id": load_id,
         "amount": float(req.amount),
         "currency": str(req.currency).upper(),

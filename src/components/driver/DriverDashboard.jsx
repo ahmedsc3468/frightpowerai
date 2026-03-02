@@ -501,6 +501,24 @@ export default function DriverDashboard() {
     const tick = async () => {
       try {
         const token = await currentUser.getIdToken();
+
+        // Best-effort: process due calendar reminders (in-app) for assigned events.
+        try {
+          const rr = await fetch(`${API_URL}/calendar/driver/reminders/poll`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${token}` }
+          });
+          if (rr.ok) {
+            const rj = await rr.json();
+            const created = Number(rj?.created || 0);
+            if (created > 0) {
+              fetchNotifications();
+            }
+          }
+        } catch {
+          // ignore
+        }
+
         const res = await fetch(`${API_URL}/messaging/unread/summary`, {
           headers: { 'Authorization': `Bearer ${token}` }
         });

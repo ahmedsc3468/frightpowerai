@@ -1066,6 +1066,20 @@ async def get_current_user(
             # Never fail auth for session touch errors.
             pass
 
+        # Role source-of-truth: prefer Firebase custom claims when present.
+        # This lets admins be enforced via signed tokens, while regular users can
+        # still fall back to the Firestore role (which is now client-write protected).
+        try:
+            claim_role = decoded_token.get("role")
+            if claim_role:
+                user_data["role"] = str(claim_role)
+
+            claim_admin_approved = decoded_token.get("admin_approved")
+            if claim_admin_approved is not None:
+                user_data["admin_approved"] = bool(claim_admin_approved)
+        except Exception:
+            pass
+
         return user_data
         
     except asyncio.TimeoutError:
@@ -1795,6 +1809,16 @@ async def get_current_user_profile(user: Dict[str, Any] = Depends(get_current_us
         "gps_lng": user.get("gps_lng"),
         "utc_offset_minutes": user.get("utc_offset_minutes"),
         "trusted_devices_enabled": user.get("trusted_devices_enabled", False),
+
+        # Shipper/Broker business profile fields
+        "business_type": user.get("business_type"),
+        "freight_type": user.get("freight_type"),
+        "regions_of_operation": user.get("regions_of_operation"),
+
+        # Shipper/Broker onboarding/profile fields
+        "tax_id": user.get("tax_id"),
+        "website": user.get("website"),
+        "contact_title": user.get("contact_title"),
     }
     return UserProfile(**profile_data)
 
@@ -1840,7 +1864,7 @@ async def update_user_settings(
 
     if "date_format" in update_data:
         df = str(update_data.get("date_format") or "").strip().lower()
-        if df not in {"mdy", "dmy"}:
+        if df not in {"mdy", "dmy", "ymd"}:
             raise HTTPException(status_code=400, detail="Invalid date_format")
         update_data["date_format"] = df
 

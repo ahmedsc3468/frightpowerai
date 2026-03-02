@@ -1,10 +1,111 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import '../../styles/carrier/ConsentESignature.css';
+import { jsPDF } from 'jspdf';
 
 export default function ConsentESignature() {
   const [activeTab, setActiveTab] = useState('active-signatures');
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('All Categories');
+
+  const getDefaultDocumentExportType = () => {
+    try {
+      const stored = JSON.parse(localStorage.getItem('fp_carrier_preferences') || '{}') || {};
+      const raw = String(stored.defaultDocumentExportType || '').trim().toLowerCase();
+      return raw === 'pdf' || raw === 'json' || raw === 'csv' ? raw : 'pdf';
+    } catch {
+      return 'pdf';
+    }
+  };
+
+  const downloadBlob = (blob, filename) => {
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(url);
+  };
+
+  const escapeCsvCell = (value) => {
+    const s = value == null ? '' : String(value);
+    const escaped = s.replace(/"/g, '""');
+    return /[",\n\r]/.test(escaped) ? `"${escaped}"` : escaped;
+  };
+
+  const exportRows = ({ title, filenameBase, columns, rows }) => {
+    const type = getDefaultDocumentExportType();
+    const safeBase = String(filenameBase || 'export').trim() || 'export';
+    const now = new Date();
+    const dateStamp = now.toISOString().slice(0, 10);
+
+    if (type === 'json') {
+      const payload = {
+        title,
+        exported_at: now.toISOString(),
+        rows,
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
+      downloadBlob(blob, `${safeBase}_${dateStamp}.json`);
+      return;
+    }
+
+    if (type === 'csv') {
+      const header = columns.map((c) => escapeCsvCell(c.header)).join(',');
+      const lines = (rows || []).map((row) => {
+        return columns
+          .map((c) => {
+            try {
+              return escapeCsvCell(c.value(row));
+            } catch {
+              return '';
+            }
+          })
+          .join(',');
+      });
+      const csv = [header, ...lines].join('\n');
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+      downloadBlob(blob, `${safeBase}_${dateStamp}.csv`);
+      return;
+    }
+
+    // PDF
+    const doc = new jsPDF({ orientation: 'portrait', unit: 'pt', format: 'letter' });
+    const marginX = 40;
+    let y = 50;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(14);
+    doc.text(title || 'Export', marginX, y);
+    y += 18;
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(10);
+    doc.text(`Exported: ${now.toLocaleString()}`, marginX, y);
+    y += 18;
+
+    const maxWidth = 540;
+    const lineHeight = 14;
+    const addLine = (text) => {
+      const lines = doc.splitTextToSize(String(text || ''), maxWidth);
+      for (const l of lines) {
+        if (y > 760) {
+          doc.addPage();
+          y = 50;
+        }
+        doc.text(l, marginX, y);
+        y += lineHeight;
+      }
+    };
+
+    (rows || []).forEach((row, idx) => {
+      if (idx > 0) y += 6;
+      addLine(`${idx + 1}. ${columns.map((c) => `${c.header}: ${c.value(row) ?? ''}`).join(' | ')}`);
+    });
+
+    const blob = doc.output('blob');
+    downloadBlob(blob, `${safeBase}_${dateStamp}.pdf`);
+  };
   
   // Active Signatures state
   const [documentSearch, setDocumentSearch] = useState('');
@@ -198,6 +299,112 @@ export default function ConsentESignature() {
     }
   ];
 
+  const completedArchiveDocuments = useMemo(() => {
+    return [
+      {
+        id: 1,
+        title: 'Carrier Safety Packet v2.1',
+        meta: 'Contract #CSP-2024-001',
+        iconColor: 'red',
+        iconClass: 'fa-solid fa-file-pdf',
+        recipient: { avatar: 'JS', name: 'John Smith' },
+        moreRecipients: '+2 others',
+        completedAt: 'Dec 15, 2024 2:34 PM',
+        retentionLabel: '3-Year Storage',
+        retentionClass: 'three-year',
+        statusLabel: 'Signed & Archived',
+      },
+      {
+        id: 2,
+        title: 'Master Service Agreement',
+        meta: 'Contract #MSA-2024-089',
+        iconColor: 'blue',
+        iconClass: 'fa-solid fa-file-alt',
+        recipient: { avatar: 'SJ', name: 'Sarah Johnson' },
+        moreRecipients: '',
+        completedAt: 'Dec 14, 2024 11:22 AM',
+        retentionLabel: 'Permanent',
+        retentionClass: 'permanent',
+        statusLabel: 'Signed & Archived',
+      },
+      {
+        id: 3,
+        title: 'Bill of Lading #BOL-789456',
+        meta: 'Load #FP-2024-3421',
+        iconColor: 'green',
+        iconClass: 'fa-solid fa-file-excel',
+        recipient: { avatar: 'MD', name: 'Mike Davis' },
+        moreRecipients: '+1 other',
+        completedAt: 'Dec 13, 2024 4:15 PM',
+        retentionLabel: '5-Year Storage',
+        retentionClass: 'five-year',
+        statusLabel: 'Signed & Archived',
+      },
+      {
+        id: 4,
+        title: 'Non-Disclosure Agreement',
+        meta: 'NDA-2024-156',
+        iconColor: 'purple',
+        iconClass: 'fa-solid fa-shield-alt',
+        recipient: { avatar: 'LC', name: 'Lisa Chen' },
+        moreRecipients: '',
+        completedAt: 'Dec 12, 2024 9:45 AM',
+        retentionLabel: '3-Year Storage',
+        retentionClass: 'three-year',
+        statusLabel: 'Signed & Archived',
+      },
+      {
+        id: 5,
+        title: 'Proof of Delivery #POD-321987',
+        meta: 'Load #FP-2024-3420',
+        iconColor: 'orange',
+        iconClass: 'fa-solid fa-clipboard-check',
+        recipient: { avatar: 'RW', name: 'Robert Wilson' },
+        moreRecipients: '+2 others',
+        completedAt: 'Dec 11, 2024 6:30 PM',
+        retentionLabel: '5-Year Storage',
+        retentionClass: 'five-year',
+        statusLabel: 'Signed & Archived',
+      },
+    ];
+  }, []);
+
+  const exportActiveSignatureList = () => {
+    exportRows({
+      title: 'Active Signatures',
+      filenameBase: 'active_signatures',
+      rows: activeDocuments,
+      columns: [
+        { header: 'Document', value: (r) => r?.name || '' },
+        { header: 'Type', value: (r) => r?.type || '' },
+        { header: 'Initiator', value: (r) => r?.initiator || '' },
+        { header: 'Date Sent', value: (r) => r?.dateSent || '' },
+        { header: 'Due Date', value: (r) => r?.dueDate || '' },
+        { header: 'Status', value: (r) => r?.status || '' },
+        {
+          header: 'Recipients',
+          value: (r) => (r?.recipients || []).map((x) => x?.name).filter(Boolean).join('; '),
+        },
+      ],
+    });
+  };
+
+  const exportCompletedArchiveList = () => {
+    exportRows({
+      title: 'Completed Archive',
+      filenameBase: 'completed_archive',
+      rows: completedArchiveDocuments,
+      columns: [
+        { header: 'Document', value: (r) => r?.title || '' },
+        { header: 'Meta', value: (r) => r?.meta || '' },
+        { header: 'Recipient', value: (r) => r?.recipient?.name || '' },
+        { header: 'Date Completed', value: (r) => r?.completedAt || '' },
+        { header: 'Retention Tag', value: (r) => r?.retentionLabel || '' },
+        { header: 'Status', value: (r) => r?.statusLabel || '' },
+      ],
+    });
+  };
+
   const itemsPerPage = 5;
   const totalPages = Math.ceil(activeDocuments.length / itemsPerPage);
   const currentDocuments = activeDocuments.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
@@ -253,14 +460,14 @@ export default function ConsentESignature() {
                 <i className="fa-solid fa-plus"></i>
                 New Document
               </button>
-              <button className="btn small ghost-cd">
+              <button className="btn small ghost-cd" onClick={exportActiveSignatureList}>
                 <i className="fa-solid fa-file-export"></i>
                 Export List
               </button>
             </>
           ) : activeTab === 'completed-archive' ? (
             <>
-              <button className="btn small ghost-cd">
+              <button className="btn small ghost-cd" onClick={exportCompletedArchiveList}>
                 <i className="fa-solid fa-download"></i>
                 Export
               </button>
@@ -634,189 +841,45 @@ export default function ConsentESignature() {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr>
-                    <td data-label="Select">
-                      <input type="checkbox" />
-                    </td>
-                    <td data-label="Document">
-                      <div className="document-name-cell">
-                        <div className="document-icon red">
-                          <i className="fa-solid fa-file-pdf"></i>
+                  {completedArchiveDocuments.map((d) => (
+                    <tr key={d.id}>
+                      <td data-label="Select">
+                        <input type="checkbox" />
+                      </td>
+                      <td data-label="Document">
+                        <div className="document-name-cell">
+                          <div className={`document-icon ${d.iconColor}`}>
+                            <i className={d.iconClass}></i>
+                          </div>
+                          <div className="document-info">
+                            <div className="document-title">{d.title}</div>
+                            <div className="document-meta">{d.meta}</div>
+                          </div>
                         </div>
-                        <div className="document-info">
-                          <div className="document-title">Carrier Safety Packet v2.1</div>
-                          <div className="document-meta">Contract #CSP-2024-001</div>
+                      </td>
+                      <td data-label="Recipients">
+                        <div className="recipients-cell">
+                          <div className="recipient-item">
+                            <div className="recipient-avatar">{d.recipient.avatar}</div>
+                            <span className="recipient-name">{d.recipient.name}</span>
+                          </div>
+                          {d.moreRecipients ? <div className="more-recipients">{d.moreRecipients}</div> : null}
                         </div>
-                      </div>
-                    </td>
-                    <td data-label="Recipients">
-                      <div className="recipients-cell">
-                        <div className="recipient-item">
-                          <div className="recipient-avatar">JS</div>
-                          <span className="recipient-name">John Smith</span>
-                        </div>
-                        <div className="more-recipients">+2 others</div>
-                      </div>
-                    </td>
-                    <td data-label="Date Completed">
-                      <div className="date-cell">Dec 15, 2024 2:34 PM</div>
-                    </td>
-                    <td data-label="Retention Tag">
-                      <span className="retention-tag three-year">3-Year Storage</span>
-                    </td>
-                    <td data-label="Status">
-                      <span className="status-badge green">Signed & Archived</span>
-                    </td>
-                    <td data-label="Action">
-                      <button className="actionn-btnn view">View</button>
-                    </td>
-                  </tr>
-                  <tr>
-                    <td data-label="Select">
-                      <input type="checkbox" />
-                    </td>
-                    <td data-label="Document">
-                      <div className="document-name-cell">
-                        <div className="document-icon blue">
-                          <i className="fa-solid fa-file-alt"></i>
-                        </div>
-                        <div className="document-info">
-                          <div className="document-title">Master Service Agreement</div>
-                          <div className="document-meta">Contract #MSA-2024-089</div>
-                        </div>
-                      </div>
-                    </td>
-                    <td data-label="Recipients">
-                      <div className="recipients-cell">
-                        <div className="recipient-item">
-                          <div className="recipient-avatar">SJ</div>
-                          <span className="recipient-name">Sarah Johnson</span>
-                        </div>
-                      </div>
-                    </td>
-                    <td data-label="Date Completed">
-                      <div className="date-cell">Dec 14, 2024 11:22 AM</div>
-                    </td>
-                    <td data-label="Retention Tag">
-                      <span className="retention-tag permanent">Permanent</span>
-                    </td>
-                    <td data-label="Status">
-                      <span className="status-badge green">Signed & Archived</span>
-                    </td>
-                    <td data-label="Action">
-                      <button className="actionn-btnn view">View</button>
-                    </td>
-                  </tr>
-                  <tr>
-                    <td data-label="Select">
-                      <input type="checkbox" />
-                    </td>
-                    <td data-label="Document">
-                      <div className="document-name-cell">
-                        <div className="document-icon green">
-                          <i className="fa-solid fa-file-excel"></i>
-                        </div>
-                        <div className="document-info">
-                          <div className="document-title">Bill of Lading #BOL-789456</div>
-                          <div className="document-meta">Load #FP-2024-3421</div>
-                        </div>
-                      </div>
-                    </td>
-                    <td data-label="Recipients">
-                      <div className="recipients-cell">
-                        <div className="recipient-item">
-                          <div className="recipient-avatar">MD</div>
-                          <span className="recipient-name">Mike Davis</span>
-                        </div>
-                        <div className="more-recipients">+1 other</div>
-                      </div>
-                    </td>
-                    <td data-label="Date Completed">
-                      <div className="date-cell">Dec 13, 2024 4:15 PM</div>
-                    </td>
-                    <td data-label="Retention Tag">
-                      <span className="retention-tag five-year">5-Year Storage</span>
-                    </td>
-                    <td data-label="Status">
-                      <span className="status-badge green">Signed & Archived</span>
-                    </td>
-                    <td data-label="Action">
-                      <button className="actionn-btnn view">View</button>
-                    </td>
-                  </tr>
-                  <tr>
-                    <td data-label="Select">
-                      <input type="checkbox" />
-                    </td>
-                    <td data-label="Document">
-                      <div className="document-name-cell">
-                        <div className="document-icon purple">
-                          <i className="fa-solid fa-shield-alt"></i>
-                        </div>
-                        <div className="document-info">
-                          <div className="document-title">Non-Disclosure Agreement</div>
-                          <div className="document-meta">NDA-2024-156</div>
-                        </div>
-                      </div>
-                    </td>
-                    <td data-label="Recipients">
-                      <div className="recipients-cell">
-                        <div className="recipient-item">
-                          <div className="recipient-avatar">LC</div>
-                          <span className="recipient-name">Lisa Chen</span>
-                        </div>
-                      </div>
-                    </td>
-                    <td data-label="Date Completed">
-                      <div className="date-cell">Dec 12, 2024 9:45 AM</div>
-                    </td>
-                    <td data-label="Retention Tag">
-                      <span className="retention-tag three-year">3-Year Storage</span>
-                    </td>
-                    <td data-label="Status">
-                      <span className="status-badge green">Signed & Archived</span>
-                    </td>
-                    <td data-label="Action">
-                      <button className="actionn-btnn view">View</button>
-                    </td>
-                  </tr>
-                  <tr>
-                    <td data-label="Select">
-                      <input type="checkbox" />
-                    </td>
-                    <td data-label="Document">
-                      <div className="document-name-cell">
-                        <div className="document-icon orange">
-                          <i className="fa-solid fa-clipboard-check"></i>
-                        </div>
-                        <div className="document-info">
-                          <div className="document-title">Proof of Delivery #POD-321987</div>
-                          <div className="document-meta">Load #FP-2024-3420</div>
-                        </div>
-                      </div>
-                    </td>
-                    <td data-label="Recipients">
-                      <div className="recipients-cell">
-                        <div className="recipient-item">
-                          <div className="recipient-avatar">RW</div>
-                          <span className="recipient-name">Robert Wilson</span>
-                        </div>
-                        <div className="more-recipients">+2 others</div>
-                      </div>
-                    </td>
-                    <td data-label="Date Completed">
-                      <div className="date-cell">Dec 11, 2024 6:30 PM</div>
-                    </td>
-                    <td data-label="Retention Tag">
-                      <span className="retention-tag five-year">5-Year Storage</span>
-                    </td>
-                    <td data-label="Status">
-                      <span className="status-badge green">Signed & Archived</span>
-                    </td>
-                    <td data-label="Action">
-                      <button className="actionn-btnn view">View</button>
-                    </td>
-                  </tr>
+                      </td>
+                      <td data-label="Date Completed">
+                        <div className="date-cell">{d.completedAt}</div>
+                      </td>
+                      <td data-label="Retention Tag">
+                        <span className={`retention-tag ${d.retentionClass}`}>{d.retentionLabel}</span>
+                      </td>
+                      <td data-label="Status">
+                        <span className="status-badge green">{d.statusLabel}</span>
+                      </td>
+                      <td data-label="Action">
+                        <button className="actionn-btnn view">View</button>
+                      </td>
+                    </tr>
+                  ))}
                 </tbody>
               </table>
             </div>
@@ -848,7 +911,7 @@ export default function ConsentESignature() {
               </div>
             </div>
             <div className="notice-actions">
-              <button className="btn small-cd">
+              <button className="btn small-cd" onClick={exportCompletedArchiveList}>
                 <i className="fa-solid fa-download"></i>
                 Compliance Export
               </button>
