@@ -5,6 +5,7 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 import sys
+import time
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -197,6 +198,7 @@ def assistant_env(monkeypatch):
     monkeypatch.setattr(role_chat.settings, "GROQ_API_KEY", "", raising=False)
 
     # Seed representative data for tools/context/analytics.
+    now_ts = float(time.time())
     fake_db.collection("loads").document("L_POSTED_1").set(
         {
             "load_id": "L_POSTED_1",
@@ -207,6 +209,22 @@ def assistant_env(monkeypatch):
             "delivery_date": "2026-01-05",
             "linehaul_rate": 1400,
             "created_by": "shipper1",
+            "created_at": now_ts - 3600,
+            "updated_at": now_ts - 1200,
+        }
+    )
+    fake_db.collection("loads").document("L_POSTED_OLD").set(
+        {
+            "load_id": "L_POSTED_OLD",
+            "status": "posted",
+            "origin": "Phoenix, AZ",
+            "destination": "Denver, CO",
+            "pickup_date": "2025-12-01",
+            "delivery_date": "2025-12-02",
+            "linehaul_rate": 1200,
+            "created_by": "shipper1",
+            "created_at": now_ts - (40 * 86400),
+            "updated_at": now_ts - (39 * 86400),
         }
     )
     fake_db.collection("loads").document("L_DRIVER_1").set(
@@ -224,6 +242,26 @@ def assistant_env(monkeypatch):
             "created_by": "shipper1",
             "offers": [],
             "last_location": {"latitude": 33.4484, "longitude": -112.0740, "timestamp": 1772542200.0},
+            "additional_stops": [
+                {"type": "fuel_stop", "location": "Albuquerque, NM", "eta": "2026-01-05 10:00 AM"},
+                {"type": "weigh_station", "location": "Amarillo, TX", "eta": "2026-01-05 2:00 PM"},
+            ],
+            "created_at": now_ts - 7200,
+            "updated_at": now_ts - 1800,
+        }
+    )
+    fake_db.collection("loads").document("FP-26ATL-YJ405-S895159").set(
+        {
+            "load_id": "FP-26ATL-YJ405-S895159",
+            "status": "posted",
+            "origin": "Chicago, IL",
+            "destination": "Dallas, TX",
+            "created_by": "shipper1",
+            "offers": [
+                {"offer_id": "off_1", "carrier_id": "carrier1", "carrier_name": "Carrier One", "status": "pending"}
+            ],
+            "created_at": now_ts - 5400,
+            "updated_at": now_ts - 2400,
         }
     )
     fake_db.collection("marketplace_services").document("svc_1").set(
@@ -417,11 +455,17 @@ def test_role_assistant_infers_and_fetches_associated_drivers(assistant_env):
     assert tools[0].get("name") == "get_associated_drivers"
     assert tools[0].get("ok") is True
     result = tools[0].get("result") or {}
-    assert str(result.get("carrier_id") or "") == "carrier1"
+    assert "carrier_id" not in result
     assert int(result.get("total") or 0) >= 2
     names = {str(r.get("name") or "") for r in (result.get("drivers") or [])}
     assert "Abbas Khan" in names
     assert "Driver Two" in names
+    # Driver role must not receive operational/private IDs for associated drivers.
+    first_driver = (result.get("drivers") or [{}])[0]
+    assert "driver_id" not in first_driver
+    assert "status" not in first_driver
+    assert "is_available" not in first_driver
+    assert "vehicle_type" not in first_driver
 
 
 def test_shipper_natural_language_posted_count_uses_live_load_tool(assistant_env):
@@ -445,7 +489,7 @@ def test_shipper_natural_language_posted_count_uses_live_load_tool(assistant_env
     assert tools[0].get("ok") is True
     result = tools[0].get("result") or {}
     assert str(result.get("status_filter") or "") == "posted"
-    assert int(result.get("total") or 0) == 1
+    assert int(result.get("total") or 0) == 3
 
 
 def test_shipper_natural_language_in_transit_count_uses_status_alias(assistant_env):
@@ -470,6 +514,176 @@ def test_shipper_natural_language_in_transit_count_uses_status_alias(assistant_e
     result = tools[0].get("result") or {}
     assert str(result.get("status_filter") or "") == "in_transit"
     assert int(result.get("total") or 0) == 1
+
+
+def test_offer_query_extracts_real_load_id_instead_of_first_word(assistant_env):
+    client = assistant_env["client"]
+    _set_user(assistant_env, {"uid": "shipper1", "role": "shipper"})
+
+    res = client.post(
+        "/chat/assistant",
+        json={"message": "show offers for load FP-26ATL-YJ405-S895159"},
+    )
+    assert res.status_code == 200
+    tools = (res.json() or {}).get("tools_executed") or []
+    assert len(tools) == 1
+    assert tools[0].get("name") == "get_load_offers"
+    assert tools[0].get("ok") is True
+    result = tools[0].get("result") or {}
+    assert str(result.get("load_id") or "") == "FP-26ATL-YJ405-S895159"
+    assert int(result.get("total") or 0) >= 1
+
+
+def test_show_my_offers_without_load_id_uses_summary_tool(assistant_env):
+    client = assistant_env["client"]
+    _set_user(assistant_env, {"uid": "shipper1", "role": "shipper"})
+
+    res = client.post("/chat/assistant", json={"message": "show my offers"})
+    assert res.status_code == 200
+    tools = (res.json() or {}).get("tools_executed") or []
+    assert len(tools) == 1
+    assert tools[0].get("name") == "get_load_summary"
+    assert tools[0].get("ok") is True
+
+
+def test_compliance_steps_phrase_maps_to_compliance_tasks_tool(assistant_env):
+    client = assistant_env["client"]
+    _set_user(assistant_env, {"uid": "carrier1", "role": "carrier", "onboarding_completed": False})
+
+    res = client.post("/chat/assistant", json={"message": "show me compliance steps"})
+    assert res.status_code == 200
+    tools = (res.json() or {}).get("tools_executed") or []
+    assert len(tools) == 1
+    assert tools[0].get("name") == "get_compliance_tasks"
+    assert tools[0].get("ok") is True
+
+
+def test_invoice_payment_status_phrase_maps_to_financial_snapshot_tool(assistant_env):
+    client = assistant_env["client"]
+    _set_user(assistant_env, {"uid": "carrier1", "role": "carrier"})
+
+    res = client.post("/chat/assistant", json={"message": "invoice payment status"})
+    assert res.status_code == 200
+    tools = (res.json() or {}).get("tools_executed") or []
+    assert len(tools) == 1
+    assert tools[0].get("name") == "get_earnings_snapshot"
+    assert tools[0].get("ok") is True
+
+
+def test_active_loads_query_maps_to_active_status_filter(assistant_env):
+    client = assistant_env["client"]
+    _set_user(assistant_env, {"uid": "shipper1", "role": "shipper"})
+
+    res = client.post("/chat/assistant", json={"message": "list my active loads"})
+    assert res.status_code == 200
+    tools = (res.json() or {}).get("tools_executed") or []
+    assert len(tools) == 1
+    assert tools[0].get("name") == "list_my_loads"
+    assert tools[0].get("ok") is True
+    result = tools[0].get("result") or {}
+    statuses = set(result.get("statuses_filter") or [])
+    assert "posted" in statuses
+    assert int(result.get("total") or 0) >= 1
+
+
+def test_next_stops_and_etas_query_maps_to_structured_tool(assistant_env):
+    client = assistant_env["client"]
+    _set_user(assistant_env, {"uid": "driver1", "role": "driver"})
+
+    res = client.post("/chat/assistant", json={"message": "Show my next stops and ETAs"})
+    assert res.status_code == 200
+    tools = (res.json() or {}).get("tools_executed") or []
+    assert len(tools) == 1
+    assert tools[0].get("name") == "get_next_stops_etas"
+    assert tools[0].get("ok") is True
+    result = tools[0].get("result") or {}
+    assert bool(result.get("has_active_load"))
+    assert int(result.get("total") or 0) >= 1
+
+
+def test_today_date_range_intent_filters_load_counts(assistant_env):
+    client = assistant_env["client"]
+    _set_user(assistant_env, {"uid": "shipper1", "role": "shipper"})
+
+    res = client.post("/chat/assistant", json={"message": "how many posted loads do i have today"})
+    assert res.status_code == 200
+    tools = (res.json() or {}).get("tools_executed") or []
+    assert len(tools) == 1
+    assert tools[0].get("name") == "list_my_loads"
+    result = tools[0].get("result") or {}
+    assert str(result.get("status_filter") or "") == "posted"
+    assert result.get("date_from_ts") is not None
+    assert result.get("date_to_ts") is not None
+    # Only today's posted loads should be counted, not historical posted loads.
+    assert int(result.get("total") or 0) == 2
+
+
+def test_shipper_cannot_access_associated_drivers_tool(assistant_env):
+    client = assistant_env["client"]
+    _set_user(assistant_env, {"uid": "shipper1", "role": "shipper"})
+
+    res = client.post("/chat/assistant", json={"message": "who are the drivers associated with me"})
+    assert res.status_code == 200
+    tools = (res.json() or {}).get("tools_executed") or []
+    assert len(tools) == 1
+    assert tools[0].get("name") == "get_associated_drivers"
+    assert tools[0].get("ok") is False
+    assert "not allowed for role 'shipper'" in str(tools[0].get("error") or "")
+
+
+def test_driver_cannot_read_unassigned_load_details_by_id(assistant_env):
+    client = assistant_env["client"]
+    _set_user(assistant_env, {"uid": "driver1", "role": "driver"})
+
+    res = client.post(
+        "/chat/assistant",
+        json={
+            "message": "show load details",
+            "tool_name": "get_load_details",
+            "tool_args": {"load_id": "L_POSTED_1"},
+        },
+    )
+    assert res.status_code == 200
+    tools = (res.json() or {}).get("tools_executed") or []
+    assert len(tools) == 1
+    assert tools[0].get("name") == "get_load_details"
+    assert tools[0].get("ok") is False
+    assert "role-visible loads" in str(tools[0].get("error") or "")
+
+
+def test_driver_tool_payload_redacts_ids_and_tokens(assistant_env):
+    client = assistant_env["client"]
+    _set_user(
+        assistant_env,
+        {
+            "uid": "driver1",
+            "role": "driver",
+            "name": "Driver One",
+            "onboarding_completed": True,
+            "email": "driver1@example.com",
+        },
+    )
+
+    res = client.post("/chat/assistant", json={"message": "who are the drivers associated with me"})
+    assert res.status_code == 200
+    tools = (res.json() or {}).get("tools_executed") or []
+    assert len(tools) == 1
+    result = tools[0].get("result") or {}
+    assert "carrier_id" not in result
+    for row in (result.get("drivers") or []):
+        assert "driver_id" not in row
+
+
+def test_non_admin_reply_text_sanitizer_masks_sensitive_tokens():
+    from apps.api import role_chat
+
+    raw = "driver_id: abc123 carrier_id=xyz789 email test@example.com uid: p123 tax_id=7890"
+    out = role_chat._sanitize_reply_text_for_role("driver", raw)
+    assert "abc123" not in out
+    assert "xyz789" not in out
+    assert "test@example.com" not in out
+    assert "p123" not in out
+    assert "7890" not in out
 
 
 def test_role_assistant_preferences_round_trip_and_validation(assistant_env):
