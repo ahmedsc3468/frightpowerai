@@ -423,6 +423,41 @@ async def get_onboarding_data(
     if not isinstance(equipment_counts, dict):
         equipment_counts = {}
 
+    def _first_non_empty(*keys: str):
+        for k in keys:
+            v = onboarding_data.get(k)
+            if v is None:
+                continue
+            if isinstance(v, str):
+                if v.strip() == "":
+                    continue
+                return v
+            return v
+        return None
+
+    # Shipper-specific onboarding fields (persisted via /onboarding/save into onboarding_data JSON)
+    shipper_fields: Dict[str, Any] = {}
+    for out_key, keys in {
+        "businessType": ("businessType", "business_type"),
+        "businessName": ("businessName", "business_name"),
+        "taxId": ("taxId", "tax_id"),
+        "businessAddress": ("businessAddress", "business_address"),
+        "businessPhone": ("businessPhone", "business_phone"),
+        "businessEmail": ("businessEmail", "business_email"),
+        "website": ("website",),
+        "contactFullName": ("contactFullName", "contact_full_name"),
+        "contactTitle": ("contactTitle", "contact_title"),
+        "contactPhone": ("contactPhone", "contact_phone"),
+        "contactEmail": ("contactEmail", "contact_email"),
+        "freightType": ("freightType", "freight_type"),
+        "preferredEquipment": ("preferredEquipment", "preferred_equipment"),
+        "avgMonthlyVolume": ("avgMonthlyVolume", "avg_monthly_volume"),
+        "regionsOfOperation": ("regionsOfOperation", "regions_of_operation"),
+    }.items():
+        v = _first_non_empty(*keys)
+        if v is not None:
+            shipper_fields[out_key] = v
+
     power_units_count = _coerce_int(
         equipment_counts.get("powerUnits")
         or equipment_counts.get("power_units")
@@ -507,6 +542,9 @@ async def get_onboarding_data(
                 **({"reefers": reefers_count} if reefers_count is not None else {}),
                 **({"dryVans": dry_vans_count} if dry_vans_count is not None else {}),
             } if any(v is not None for v in [power_units_count, reefers_count, dry_vans_count]) else None,
+
+            # Shipper onboarding fields (when present).
+            **shipper_fields,
         },
         "consents": consents_summary,
         "is_available": is_available,

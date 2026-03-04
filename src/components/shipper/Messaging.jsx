@@ -183,6 +183,7 @@ export default function Messaging({ initialThreadId = null } = {}) {
 
   const handleSend = async () => {
     if (!message.trim() || !selectedThread) return;
+    if (selectedThread.is_read_only) return;
     const text = message.trim();
     setMessage('');
     await postJson(`/messaging/threads/${selectedThread.id}/messages`, { text });
@@ -429,19 +430,27 @@ export default function Messaging({ initialThreadId = null } = {}) {
               ))}
             </div>
 
-            <div className="message-input-area">
-              <input
-                className="message-input"
-                type="text"
-                placeholder="Type your message..."
-                value={message}
-                onChange={e => setMessage(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && handleSend()}
-              />
-              <button className="send-btn" onClick={handleSend}>
-                <i className="fa-solid fa-paper-plane"></i>
-              </button>
-            </div>
+            {selectedThread.is_read_only ? (
+              <div className="message-input-area" style={{ justifyContent: 'center', opacity: 0.85 }}>
+                <div style={{ fontSize: 13, fontWeight: 800, opacity: 0.9 }}>
+                  Chat ended for this load (read-only).
+                </div>
+              </div>
+            ) : (
+              <div className="message-input-area">
+                <input
+                  className="message-input"
+                  type="text"
+                  placeholder="Type your message..."
+                  value={message}
+                  onChange={e => setMessage(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && handleSend()}
+                />
+                <button className="send-btn" onClick={handleSend}>
+                  <i className="fa-solid fa-paper-plane"></i>
+                </button>
+              </div>
+            )}
           </main>
         )}
 

@@ -67,6 +67,10 @@ class CreateCarrierDirectThreadRequest(BaseModel):
     carrier_id: str
 
 
+class CreateLoadTransitThreadRequest(BaseModel):
+    load_id: str
+
+
 class AdminCreateUserDirectThreadRequest(BaseModel):
     target_uid: str
 
@@ -121,6 +125,56 @@ def _shipper_carrier_thread_id(shipper_id: str, carrier_id: str) -> str:
 def _admin_user_thread_id(admin_id: str, user_id: str) -> str:
     # One admin <-> one user per thread.
     return f"au_{admin_id}_{user_id}"
+
+
+def _load_transit_thread_id(load_id: str) -> str:
+    safe = str(load_id or "").strip().replace("/", "_")
+    if not safe:
+        raise HTTPException(status_code=400, detail="Missing load_id")
+    return f"lt_{safe}"
+
+
+def _get_load_doc(load_id: str) -> Dict[str, Any]:
+    snap = db.collection("loads").document(str(load_id)).get()
+    if not snap.exists:
+        raise HTTPException(status_code=404, detail="Load not found")
+    d = snap.to_dict() or {}
+    d["id"] = snap.id
+    return d
+
+
+def _load_status(load: Dict[str, Any]) -> str:
+    return str(load.get("status") or "").strip().lower()
+
+
+def _load_assigned_driver_uid(load: Dict[str, Any]) -> str:
+    return str(load.get("assigned_driver") or load.get("assigned_driver_id") or load.get("driver_id") or "").strip()
+
+
+def _load_shipper_uid(load: Dict[str, Any]) -> Optional[str]:
+    # Prefer explicit normalized ownership fields.
+    if str(load.get("payer_role") or "").strip().lower() == "shipper":
+        uid = str(load.get("payer_uid") or "").strip()
+        if uid:
+            return uid
+
+    # Backward-compat: some docs include creator_role.
+    if str(load.get("creator_role") or "").strip().lower() == "shipper":
+        uid = str(load.get("created_by") or "").strip()
+        if uid:
+            return uid
+
+    # Last resort (non-standard field)
+    uid = str(load.get("shipper_id") or "").strip()
+    return uid or None
+
+
+def _invalidate_threads_cache(*uids: str) -> None:
+    for uid in uids:
+        if not uid:
+            continue
+        _THREADS_CACHE.pop(uid, None)
+        _THREADS_CACHE_EXPIRES.pop(uid, None)
 
 
 def _get_driver_doc(driver_id: str) -> Dict[str, Any]:
@@ -193,13 +247,39 @@ def _assert_send_allowed(user: Dict[str, Any], thread: Dict[str, Any]) -> None:
     role = user.get("role")
     uid = user.get("uid")
 
-    if thread.get("kind") not in {"carrier_driver_direct", "carrier_driver_group", "shipper_carrier_direct", "admin_user_direct"}:
+    if thread.get("kind") not in {
+        "carrier_driver_direct",
+        "carrier_driver_group",
+        "shipper_carrier_direct",
+        "admin_user_direct",
+        "load_transit_chat",
+    }:
         raise HTTPException(status_code=400, detail="Unsupported thread type")
 
     _assert_member(uid, thread)
 
     # Admin <-> user direct messaging (platform support)
     if thread.get("kind") == "admin_user_direct":
+        return
+
+    # Load transit chat: driver <-> shipper, send allowed only while load is in transit.
+    if thread.get("kind") == "load_transit_chat":
+        if role not in {"driver", "shipper"}:
+            raise HTTPException(status_code=403, detail="Messaging not enabled for this role")
+
+        driver_id = str(thread.get("driver_id") or "").strip()
+        shipper_id = str(thread.get("shipper_id") or "").strip()
+        if role == "driver" and uid != driver_id:
+            raise HTTPException(status_code=403, detail="Driver can only message within their load chats")
+        if role == "shipper" and uid != shipper_id:
+            raise HTTPException(status_code=403, detail="Shipper can only message within their load chats")
+
+        load_id = str(thread.get("load_id") or "").strip()
+        if not load_id:
+            raise HTTPException(status_code=400, detail="Thread missing load_id")
+        load = _get_load_doc(load_id)
+        if _load_status(load) != "in_transit":
+            raise HTTPException(status_code=403, detail="Chat is read-only after delivery")
         return
 
     carrier_id = thread.get("carrier_id")
@@ -651,6 +731,33 @@ def _thread_view_for_user(user: Dict[str, Any], thread: Dict[str, Any]) -> Dict[
         t["display_title"] = t.get("other_display_name") or t.get("title")
         return t
 
+    if kind == "load_transit_chat":
+        driver_id = str(t.get("driver_id") or "").strip()
+        shipper_id = str(t.get("shipper_id") or "").strip()
+        load_id = str(t.get("load_id") or "").strip()
+
+        # Best-effort computed state; used to disable composer UI.
+        try:
+            load = _get_load_doc(load_id) if load_id else {}
+            t["is_read_only"] = _load_status(load) != "in_transit"
+        except Exception:
+            t["is_read_only"] = False
+
+        if uid == driver_id:
+            other_id = shipper_id
+            udoc = _get_user_doc(other_id) if other_id else {}
+            t["other_display_name"] = _display_name_for_user_doc(udoc) if other_id else None
+            t["other_photo_url"] = _photo_url_for_user_doc(udoc) if other_id else None
+        elif uid == shipper_id:
+            other_id = driver_id
+            if other_id:
+                ident = _get_driver_identity(other_id)
+                t["other_display_name"] = ident.get("name")
+                t["other_photo_url"] = ident.get("photo_url")
+
+        t["display_title"] = t.get("other_display_name") or t.get("title") or "Load Chat"
+        return t
+
     # group threads: keep title as-is
     t["display_title"] = t.get("title")
     return t
@@ -801,6 +908,7 @@ async def list_threads(limit: int = 200, user: Dict[str, Any] = Depends(get_curr
     # Batch-load identities to avoid N+1 Firestore reads.
     driver_ids: List[str] = []
     user_ids: List[str] = []
+    load_ids: List[str] = []
     for t in raw:
         kind = t.get("kind")
         if kind == "carrier_driver_direct":
@@ -830,6 +938,20 @@ async def list_threads(limit: int = 200, user: Dict[str, Any] = Depends(get_curr
             if other_id:
                 user_ids.append(other_id)
 
+        elif kind == "load_transit_chat":
+            lid = str(t.get("load_id") or "").strip()
+            if lid:
+                load_ids.append(lid)
+
+            driver_id = str(t.get("driver_id") or "").strip()
+            shipper_id = str(t.get("shipper_id") or "").strip()
+            if role == "shipper":
+                if driver_id:
+                    driver_ids.append(driver_id)
+            else:
+                if shipper_id:
+                    user_ids.append(shipper_id)
+
     driver_ids = list({x for x in driver_ids if x})
     # Drivers also often store name/photo in users/{uid}
     user_ids = list({x for x in (user_ids + driver_ids) if x})
@@ -854,6 +976,18 @@ async def list_threads(limit: int = 200, user: Dict[str, Any] = Depends(get_curr
             )
         except Exception:
             user_docs = {}
+
+    load_docs: Dict[str, Dict[str, Any]] = {}
+    if load_ids:
+        load_ids = list({x for x in load_ids if x})
+        try:
+            load_refs = [db.collection("loads").document(lid) for lid in load_ids]
+            load_docs = await _fs_to_thread(
+                lambda: {s.id: (s.to_dict() or {}) for s in db.get_all(load_refs) if s.exists},
+                timeout_s=10.0,
+            )
+        except Exception:
+            load_docs = {}
 
     def _identity_for_driver(did: str) -> Dict[str, Any]:
         ddoc = driver_docs.get(did) or {}
@@ -924,6 +1058,30 @@ async def list_threads(limit: int = 200, user: Dict[str, Any] = Depends(get_curr
                 t["other_display_name"] = _display_name_for_user_doc(udoc)
                 t["other_photo_url"] = _photo_url_for_user_doc(udoc)
             t["display_title"] = t.get("other_display_name") or t.get("title") or "Conversation"
+            threads.append(t)
+            continue
+
+        if kind == "load_transit_chat":
+            driver_id = str(t.get("driver_id") or "").strip()
+            shipper_id = str(t.get("shipper_id") or "").strip()
+            load_id = str(t.get("load_id") or "").strip()
+            status = str((load_docs.get(load_id) or {}).get("status") or "").strip().lower()
+            t["is_read_only"] = status != "in_transit" if status else False
+
+            if uid == shipper_id:
+                other_id = driver_id
+                if other_id:
+                    ident = _identity_for_driver(other_id)
+                    t["other_display_name"] = ident.get("name")
+                    t["other_photo_url"] = ident.get("photo_url")
+            else:
+                other_id = shipper_id
+                if other_id:
+                    udoc = user_docs.get(other_id) or {}
+                    t["other_display_name"] = _display_name_for_user_doc(udoc)
+                    t["other_photo_url"] = _photo_url_for_user_doc(udoc)
+
+            t["display_title"] = t.get("other_display_name") or t.get("title") or "Load Chat"
             threads.append(t)
             continue
 
@@ -1150,6 +1308,112 @@ async def create_or_get_driver_carrier_thread(user: Dict[str, Any] = Depends(get
     }
     ref.set(data)
     log_action(driver_id, "THREAD_CREATED", f"Direct thread created with carrier {carrier_id}")
+    return {"thread": _thread_view_for_user(user, data)}
+
+
+@router.post("/driver/threads/load-transit")
+async def create_or_get_load_transit_thread_as_driver(
+    payload: CreateLoadTransitThreadRequest,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    if user.get("role") != "driver":
+        raise HTTPException(status_code=403, detail="Driver access required")
+
+    driver_id = user.get("uid")
+    load_id = _normalize_uid(payload.load_id)
+    load = _get_load_doc(load_id)
+
+    assigned_driver = _load_assigned_driver_uid(load)
+    if not assigned_driver or assigned_driver != str(driver_id or "").strip():
+        raise HTTPException(status_code=403, detail="Driver is not assigned to this load")
+
+    shipper_id = _load_shipper_uid(load)
+    if not shipper_id:
+        raise HTTPException(status_code=400, detail="Load has no shipper owner")
+
+    thread_id = _load_transit_thread_id(load_id)
+    ref = db.collection("conversations").document(thread_id)
+    snap = ref.get()
+    if snap.exists:
+        d = snap.to_dict() or {}
+        d["id"] = thread_id
+        return {"thread": _thread_view_for_user(user, d)}
+
+    if _load_status(load) != "in_transit":
+        raise HTTPException(status_code=403, detail="Chat is available only while load is in transit")
+
+    now = _now()
+    title = str(load.get("load_number") or load_id).strip() or "Load Chat"
+    data = {
+        "id": thread_id,
+        "kind": "load_transit_chat",
+        "title": title,
+        "load_id": load_id,
+        "driver_id": driver_id,
+        "shipper_id": shipper_id,
+        "member_uids": [driver_id, shipper_id],
+        "created_by": driver_id,
+        "created_at": now,
+        "updated_at": now,
+        "last_message": None,
+        "last_message_at": None,
+    }
+    ref.set(data)
+    _invalidate_threads_cache(driver_id, shipper_id)
+    log_action(driver_id, "THREAD_CREATED", f"Load transit thread created for load {load_id}")
+    return {"thread": _thread_view_for_user(user, data)}
+
+
+@router.post("/shipper/threads/load-transit")
+async def create_or_get_load_transit_thread_as_shipper(
+    payload: CreateLoadTransitThreadRequest,
+    user: Dict[str, Any] = Depends(get_current_user),
+):
+    if user.get("role") != "shipper":
+        raise HTTPException(status_code=403, detail="Shipper access required")
+
+    shipper_id = user.get("uid")
+    load_id = _normalize_uid(payload.load_id)
+    load = _get_load_doc(load_id)
+
+    owner_shipper = _load_shipper_uid(load)
+    if not owner_shipper or owner_shipper != str(shipper_id or "").strip():
+        raise HTTPException(status_code=403, detail="Shipper does not own this load")
+
+    driver_id = _load_assigned_driver_uid(load)
+    if not driver_id:
+        raise HTTPException(status_code=403, detail="Load has no assigned driver")
+
+    thread_id = _load_transit_thread_id(load_id)
+    ref = db.collection("conversations").document(thread_id)
+    snap = ref.get()
+    if snap.exists:
+        d = snap.to_dict() or {}
+        d["id"] = thread_id
+        return {"thread": _thread_view_for_user(user, d)}
+
+    if _load_status(load) != "in_transit":
+        raise HTTPException(status_code=403, detail="Chat is available only while load is in transit")
+
+    now = _now()
+    title = str(load.get("load_number") or load_id).strip() or "Load Chat"
+    data = {
+        "id": thread_id,
+        "kind": "load_transit_chat",
+        "title": title,
+        "load_id": load_id,
+        "driver_id": driver_id,
+        "shipper_id": shipper_id,
+        "member_uids": [driver_id, shipper_id],
+        "created_by": shipper_id,
+        "created_at": now,
+        "updated_at": now,
+        "last_message": None,
+        "last_message_at": None,
+    }
+    ref.set(data)
+    _invalidate_threads_cache(driver_id, shipper_id)
+    log_action(shipper_id, "THREAD_CREATED", f"Load transit thread created for load {load_id}")
     return {"thread": _thread_view_for_user(user, data)}
 
 

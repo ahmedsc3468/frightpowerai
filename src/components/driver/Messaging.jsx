@@ -449,6 +449,7 @@ export default function Messaging({ initialThreadId = null } = {}) {
   const handleSend = async () => {
     if (!message.trim() || !selectedThread) return;
     if (selectedThread.kind === 'admin_channel') return;
+    if (selectedThread.is_read_only) return;
     const text = message.trim();
     setMessage('');
     await postJson(`/messaging/threads/${selectedThread.id}/messages`, { text });
@@ -653,6 +654,12 @@ export default function Messaging({ initialThreadId = null } = {}) {
             {selectedThread.kind === 'admin_channel' ? (
               <div className="message-input-area" style={{ justifyContent: 'center', opacity: 0.85 }}>
                 <div style={{ fontSize: 13, fontWeight: 700, color: msgTheme.muted }}>{tr('messaging.adminOneWay', 'Admin notifications are one-way.')}</div>
+              </div>
+            ) : selectedThread.is_read_only ? (
+              <div className="message-input-area" style={{ justifyContent: 'center', opacity: 0.85 }}>
+                <div style={{ fontSize: 13, fontWeight: 800, color: msgTheme.muted }}>
+                  {tr('messaging.chatEnded', 'Chat ended for this load (read-only).')}
+                </div>
               </div>
             ) : (
               <div className="message-input-area">

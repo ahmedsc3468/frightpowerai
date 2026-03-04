@@ -95,6 +95,11 @@
   grid-template-columns: repeat(3, 1fr);
   gap: 18px;
 }
+
+/* Single-panel sections (e.g. Profile, Alerts) should span full content width */
+.fp-dashboard-root .fp-grid.fp-grid-single{
+  grid-template-columns: 1fr;
+}
 .fp-main .card{background:#fff;border-radius:12px;padding:18px;box-shadow:0 6px 18px rgba(16,32,39,0.06)}
 .fp-main .card h3{margin:0 0 12px 0;color:#0b3240;font-size:18px;font-weight:700}
 
@@ -161,26 +166,54 @@
   .fp-main .fp-grid{grid-template-columns:1fr}
 }
 
-/* Make header action buttons expand and be responsive for shipper dashboard */
-.fp-header .fp-header-controls{
+/* Home header: action buttons expand and stay responsive */
+.fp-header.fp-header-actions .fp-header-controls{
   display:flex;
   gap:12px;
   align-items:center;
   justify-content:flex-start;
   width:100%;
 }
-.fp-header .fp-header-controls .btn{
+.fp-header.fp-header-actions .fp-header-controls .btn{
   flex:1 1 0;
   min-width:0;
   white-space:nowrap;
   text-overflow:ellipsis;
   overflow:hidden;
-    font-size:1rem;
+  font-size:1rem;
 }
 
 @media (max-width:700px){
-  .fp-header .fp-header-controls{flex-wrap:wrap;gap:8px}
-  .fp-header .fp-header-controls .btn{flex:1 1 45%;font-size:0.8rem;padding:8px 10px}
+  .fp-header.fp-header-actions .fp-header-controls{flex-wrap:wrap;gap:8px}
+  .fp-header.fp-header-actions .fp-header-controls .btn{flex:1 1 45%;font-size:0.8rem;padding:8px 10px}
+}
+
+/* Alerts header: balanced typography + right-aligned control */
+.fp-header.fp-alerts-header{
+  align-items:flex-end;
+  gap:16px;
+}
+
+.fp-header.fp-alerts-header .fp-header-titles h2{
+  font-size:26px;
+  line-height:1.15;
+  margin:0;
+}
+
+.fp-header.fp-alerts-header .fp-subtitle{
+  font-size:14px;
+  line-height:1.35;
+}
+
+.fp-header.fp-alerts-header .fp-header-controls{
+  display:flex;
+  justify-content:flex-end;
+  align-items:center;
+}
+
+.fp-header.fp-alerts-header .fp-header-controls .btn{
+  font-size:14px;
+  padding:8px 12px;
 }
 
 /* Filter pills and search box */
