@@ -1,14 +1,57 @@
 import React from 'react';
 import '../../styles/admin/SupportHub.css';
 import '../../styles/admin/Tasks.css';
+import { getJson, postJson } from '../../api/http';
 
 export default function SupportHub(){
-  const tickets = [
-    {id:'#1021', module:'Integration (QuickBooks)', company:'First 1 Trucking LLC', priority:'High', status:'Pending', assigned:'Amina', updated:'10m ago'},
-    {id:'#1022', module:'AI Hub', company:'FreightPower AI Admin', priority:'Medium', status:'Auto-Resolved', assigned:'System', updated:'5m ago'},
-    {id:'#1023', module:'Driver App', company:'Jama Ali', priority:'Low', status:'Waiting Reply', assigned:'Support', updated:'30m ago'},
-    {id:'#1024', module:'Document Vault', company:'York Home Healthcare', priority:'High', status:'Fix Running', assigned:'AI Bot', updated:'8m ago'}
-  ];
+  const [tickets, setTickets] = React.useState([]);
+
+  const loadTickets = React.useCallback(async () => {
+    try {
+      const data = await getJson('/admin/support/tickets?limit=200');
+      setTickets(Array.isArray(data?.items) ? data.items : []);
+    } catch (e) {
+      setTickets([]);
+      alert(e?.message || 'Failed to load support tickets');
+    }
+  }, []);
+
+  React.useEffect(() => {
+    loadTickets();
+  }, [loadTickets]);
+
+  const runAction = async (id, action) => {
+    try {
+      await postJson(`/admin/support/tickets/${encodeURIComponent(id)}/action`, { action });
+      await loadTickets();
+    } catch (e) {
+      alert(e?.message || `Failed to ${action} ticket`);
+    }
+  };
+
+  const createTicket = async () => {
+    try {
+      await postJson('/admin/support/tickets', {
+        title: 'New support issue',
+        module: 'General',
+        company: 'FreightPower',
+        priority: 'Medium',
+      });
+      await loadTickets();
+    } catch (e) {
+      alert(e?.message || 'Failed to create ticket');
+    }
+  };
+
+  const runDiagnose = async () => {
+    try {
+      const data = await postJson('/admin/system/diagnose', {});
+      alert(`System health: ${Number(data?.overall_status_percent || 0)}%`);
+      await loadTickets();
+    } catch (e) {
+      alert(e?.message || 'Failed to run diagnose');
+    }
+  };
 
   return (
     <div className="support-hub-root">
@@ -92,7 +135,7 @@ export default function SupportHub(){
             <tbody>
               {tickets.map(t => (
                 <tr key={t.id}>
-                  <td className="link-id">{t.id}</td>
+                  <td className="link-id">{String(t.id || '').startsWith('#') ? t.id : `#${String(t.id || '').slice(0, 6)}`}</td>
                   <td>{t.module}</td>
                   <td>{t.company}</td>
                   <td>
@@ -101,7 +144,7 @@ export default function SupportHub(){
                   <td>{t.status}</td>
                   <td>{t.assigned}</td>
                   <td>{t.updated}</td>
-                  <td><i className="fas fa-ellipsis-h"></i></td>
+                  <td><button type="button" className="card-action" onClick={() => runAction(t.id, 'resolve')}>Resolve</button></td>
                 </tr>
               ))}
             </tbody>
@@ -132,11 +175,11 @@ export default function SupportHub(){
             <div className="suggestion-pill">"AI has fixed this automatically."</div>
           </div>
           <div></div>
-            <button className="btn small-cd" style={{width:'100%'}}>Run Auto-Diagnose</button>
+            <button className="btn small-cd" style={{width:'100%'}} type="button" onClick={runDiagnose}>Run Auto-Diagnose</button>
             <div style={{height:8}}></div>
-            <button className="btn small ghost-cd" style={{width:'100%'}}>View Integration Logs</button>
+            <button className="btn small ghost-cd" style={{width:'100%'}} type="button" onClick={runDiagnose}>View Integration Logs</button>
             <div style={{height:8}}></div>
-            <button className="btn small ghost-cd" style={{width:'100%'}}>New Ticket</button>
+            <button className="btn small ghost-cd" style={{width:'100%'}} type="button" onClick={createTicket}>New Ticket</button>
         </aside>
       </div>
 
@@ -161,8 +204,8 @@ export default function SupportHub(){
           </div>
 
           <div className="mc-communication-actions">
-            <button className="btn small-cd">Reply</button>
-            <button className="btn small-cd">AI Fix</button>
+            <button className="btn small-cd" type="button" onClick={() => tickets[0]?.id && runAction(tickets[0].id, 'reply')}>Reply</button>
+            <button className="btn small-cd" type="button" onClick={() => tickets[0]?.id && runAction(tickets[0].id, 'diagnose')}>AI Fix</button>
           </div>
         </div>
       </div>

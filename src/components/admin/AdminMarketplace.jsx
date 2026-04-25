@@ -1,7 +1,37 @@
 import React from 'react'
 import '../../styles/admin/AdminMarketplace.css'
+import { getJson, postJson } from '../../api/http'
 
 export default function AdminMarketplace(){
+  const [items, setItems] = React.useState([])
+
+  const loadListings = React.useCallback(async () => {
+    try {
+      const data = await getJson('/admin/marketplace/listings?limit=120')
+      setItems(Array.isArray(data?.items) ? data.items : [])
+    } catch (e) {
+      setItems([])
+      alert(e?.message || 'Failed to load marketplace listings')
+    }
+  }, [])
+
+  React.useEffect(() => {
+    loadListings()
+  }, [loadListings])
+
+  const runAction = async (id, action) => {
+    try {
+      if (action === 'message') {
+        alert('Use Admin Messaging to contact this listing.')
+        return
+      }
+      await postJson(`/admin/marketplace/listings/${encodeURIComponent(id)}/action`, { action })
+      await loadListings()
+    } catch (e) {
+      alert(e?.message || `Failed to ${action} listing`)
+    }
+  }
+
   return (
     <div className="admin-marketplace-root">
       {/* Header Section */}
@@ -10,11 +40,11 @@ export default function AdminMarketplace(){
           <h1>Marketplace</h1>
         </div>
         <div className="drivers-actions">
-          <button className="btn small-cd">
+          <button className="btn small-cd" type="button" onClick={loadListings}>
             <i className="fas fa-plus"></i>
             New Listing
           </button>
-          <button className="btn small ghost-cd">
+          <button className="btn small ghost-cd" type="button" onClick={loadListings}>
             <i className="fas fa-check-double"></i>
             Bulk Approve
           </button>
@@ -48,109 +78,32 @@ export default function AdminMarketplace(){
         </div>
 
       <section className="mp-grid">
-        {/* Swift Transport Co. */}
-        <div className="mp-card">
+        {(items || []).map((item) => (
+        <div className="mp-card" key={item.id}>
           <div className="mp-card-row">
             <div className="mp-left">
               <img className="mp-avatar" src="https://randomuser.me/api/portraits/men/44.jpg" alt="swift" />
               <div className="mp-meta">
-                <div className="mp-card-title">Swift Transport Co.</div>
-                <div className="mp-role"><span className="int-status-badge blue">Carrier</span></div>
+                <div className="mp-card-title">{item?.name || 'Listing'}</div>
+                <div className="mp-role"><span className="int-status-badge blue">{String(item?.role || 'provider').replace(/_/g, ' ')}</span></div>
               </div>
             </div>
             <div className="mp-right">
-              <div className="mp-rating"><strong>4.8</strong> <span className="muted">(127 reviews)</span></div>
-              <div className="mp-offer">12% OFF</div>
+              <div className="mp-rating"><strong>{Number(item?.rating || 0).toFixed(1)}</strong> <span className="muted">(reviews)</span></div>
+              <div className="mp-offer">{item?.offer || 'No Offer'}</div>
             </div>
           </div>
-          <div className="mp-tags"><span>Dispatch</span><span>Insurance</span><span>DOT</span></div>
+          <div className="mp-tags"><span>Admin</span><span>Marketplace</span><span>Listing</span></div>
           <div className="mp-compliance-row">
-            <div className="mp-compliance-bar"><div className="mp-compliance-fill valid" style={{width:'92%'}}/></div>
-            <div className="mp-compliance-label green">Valid</div>
+            <div className="mp-compliance-bar"><div className={`mp-compliance-fill ${item?.is_verified ? 'valid' : 'expiring'}`} style={{width: item?.is_verified ? '90%' : '62%'}}/></div>
+            <div className={`mp-compliance-label ${item?.is_verified ? 'green' : 'yellow'}`}>{item?.is_verified ? 'Valid' : 'Pending'}</div>
           </div>
           <div className="mp-card-footer">
-            <div className="mp-status"><span className="int-status-badge active">Active</span><span className="int-status-badge featured">Featured</span></div>
-            <div className="mp-actions"><button className="btn small-cd">Approve</button><button className="btn ghost-cd small">Feature</button></div>
+            <div className="mp-status"><span className={`int-status-badge ${item?.status === 'Suspended' ? 'revoked' : 'active'}`}>{item?.status || 'Active'}</span><span className="int-status-badge featured">{item?.is_featured ? 'Featured' : 'Standard'}</span></div>
+            <div className="mp-actions"><button className="btn small-cd" type="button" onClick={() => runAction(item.id, 'approve')}>Approve</button><button className="btn ghost-cd small" type="button" onClick={() => runAction(item.id, 'feature')}>Feature</button></div>
           </div>
         </div>
-
-        {/* Elite Logistics */}
-        <div className="mp-card">
-          <div className="mp-card-row">
-            <div className="mp-left">
-              <img className="mp-avatar" src="https://randomuser.me/api/portraits/women/65.jpg" alt="elite" />
-              <div className="mp-meta">
-                <div className="mp-card-title">Elite Logistics</div>
-                <div className="mp-role"><span className="int-status-badge blue">Shipper</span></div>
-              </div>
-            </div>
-            <div className="mp-right">
-              <div className="mp-rating"><strong>4.6</strong> <span className="muted">(89 reviews)</span></div>
-              <div className="mp-offer blue">8% OFF</div>
-            </div>
-          </div>
-          <div className="mp-tags"><span>Freight</span><span>Tracking</span></div>
-          <div className="mp-compliance-row">
-            <div className="mp-compliance-bar"><div className="mp-compliance-fill expiring" style={{width:'65%'}}/></div>
-            <div className="mp-compliance-label yellow">Expiring</div>
-          </div>
-          <div className="mp-card-footer">
-            <div className="mp-status"><span className="int-status-badge pending">Pending</span><span className="int-status-badge muted small">Standard</span></div>
-            <div className="mp-actions"><button className="btn small-cd">Approve</button><button className="btn ghost-cd small">Message</button></div>
-          </div>
-        </div>
-
-        {/* ProDriver Services */}
-        <div className="mp-card">
-          <div className="mp-card-row">
-            <div className="mp-left">
-              <img className="mp-avatar" src="https://randomuser.me/api/portraits/men/12.jpg" alt="prodriver" />
-              <div className="mp-meta">
-                <div className="mp-card-title">ProDriver Services</div>
-                <div className="mp-role"><span className="int-status-badge blue">Driver</span></div>
-              </div>
-            </div>
-            <div className="mp-right">
-              <div className="mp-rating"><strong>4.9</strong> <span className="muted">(203 reviews)</span></div>
-              <div className="mp-offer red">15% OFF</div>
-            </div>
-          </div>
-          <div className="mp-tags"><span>CDL</span><span>Safety</span><span>ELD</span></div>
-          <div className="mp-compliance-row">
-            <div className="mp-compliance-bar"><div className="mp-compliance-fill valid" style={{width:'95%'}}/></div>
-            <div className="mp-compliance-label green">Valid</div>
-          </div>
-          <div className="mp-card-footer">
-            <div className="mp-status"><span className="int-status-badge active">Active</span><span className="int-status-badge purple small">Premium</span></div>
-            <div className="mp-actions"><button className="btn small-cd">Approve</button><button className="btn ghost-cd small">Feature</button></div>
-          </div>
-        </div>
-
-        {/* TechFleet Solutions (Provider) */}
-        <div className="mp-card">
-          <div className="mp-card-row">
-            <div className="mp-left">
-              <img className="mp-avatar" src="https://randomuser.me/api/portraits/men/39.jpg" alt="techfleet" />
-              <div className="mp-meta">
-                <div className="mp-card-title">TechFleet Solutions</div>
-                <div className="mp-role"><span className="int-status-badge blue">Provider</span></div>
-              </div>
-            </div>
-            <div className="mp-right">
-              <div className="mp-rating"><strong>4.2</strong> <span className="muted">(67 reviews)</span></div>
-              <div className="mp-offer muted">No Offer</div>
-            </div>
-          </div>
-          <div className="mp-tags"><span>Software</span><span>Support</span></div>
-          <div className="mp-compliance-row">
-            <div className="mp-compliance-bar"><div className="mp-compliance-fill flagged" style={{width:'22%'}}/></div>
-            <div className="mp-compliance-label red">Flagged</div>
-          </div>
-          <div className="mp-card-footer">
-            <div className="mp-status"><span className="int-status-badge revoked">Suspended</span><span className="int-status-badge muted small">Standard</span></div>
-            <div className="mp-actions"><button className="btn small-cd">View</button><button className="btn ghost-cd small">Message</button></div>
-          </div>
-        </div>
+        ))}
       </section>
     </div>
   )

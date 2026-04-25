@@ -2,10 +2,27 @@ import React from 'react';
 import '../../styles/admin/DocumentVault.css';
 import { useAuth } from '../../contexts/AuthContext';
 import { API_URL } from '../../config';
+import { getJson, postJson } from '../../api/http';
 
 export default function AdminDocumentVault() {
   const { currentUser } = useAuth();
   const fileInputRef = React.useRef(null);
+  const [documents, setDocuments] = React.useState([]);
+  const [search, setSearch] = React.useState('');
+
+  const loadDocuments = React.useCallback(async () => {
+    try {
+      const data = await getJson('/documents?page=1&page_size=100');
+      setDocuments(Array.isArray(data?.items) ? data.items : []);
+    } catch (e) {
+      setDocuments([]);
+      alert(e?.message || 'Failed to load documents');
+    }
+  }, []);
+
+  React.useEffect(() => {
+    if (currentUser) loadDocuments();
+  }, [currentUser, loadDocuments]);
 
   const handleUploadClick = () => {
     if (!currentUser) {
@@ -35,6 +52,7 @@ export default function AdminDocumentVault() {
 
         if (response.ok) {
           alert(`Document "${file.name}" uploaded successfully!`);
+          await loadDocuments();
         } else {
           let errorDetail = 'Unknown error';
           try {
@@ -54,6 +72,26 @@ export default function AdminDocumentVault() {
     }
   };
 
+  const autoOrganize = async () => {
+    try {
+      const data = await postJson('/admin/documents/auto-organize', {});
+      alert(`Auto-organized ${Number(data?.organized || 0)} document(s).`);
+      await loadDocuments();
+    } catch (e) {
+      alert(e?.message || 'Failed to auto-organize documents');
+    }
+  };
+
+  const visibleDocs = React.useMemo(() => {
+    const q = String(search || '').trim().toLowerCase();
+    if (!q) return documents;
+    return (documents || []).filter((d) => {
+      const name = String(d?.filename || d?.file_name || d?.name || '').toLowerCase();
+      const kind = String(d?.document_type || d?.type || '').toLowerCase();
+      return name.includes(q) || kind.includes(q);
+    });
+  }, [documents, search]);
+
   return (
     <div className="dv-root admin-dv">
       <header className="fp-header">
@@ -65,10 +103,10 @@ export default function AdminDocumentVault() {
       <div className="dv-top-row">
         <div className="dv-controls">
           <div className="dv-search">
-            <input placeholder="Search documents (OCR-enabled)" />
+            <input placeholder="Search documents (OCR-enabled)" value={search} onChange={(e) => setSearch(e.target.value)} />
           </div>
-          <button className="btn small ghost-cd">Filters</button>
-          <button className="btn small ghost-cd">Auto-Organize</button>
+          <button className="btn small ghost-cd" type="button" onClick={loadDocuments}>Filters</button>
+          <button className="btn small ghost-cd" type="button" onClick={autoOrganize}>Auto-Organize</button>
           <button className="btn small-cd" type="button" onClick={handleUploadClick}>+ Upload</button>
         </div>
       </div>
@@ -95,32 +133,22 @@ export default function AdminDocumentVault() {
             </tr>
           </thead>
           <tbody>
-            <tr>
-              <td><i className="fa-regular fa-file-pdf file-ic pdf" /> <strong>insurance_certificate.pdf</strong></td>
-              <td>Alpha Freight</td>
-              <td>Carrier Insurance</td>
-              <td><span className="int-status-badge active">Verified</span></td>
-              <td>2025-11-01</td>
-              <td><i className='fa-solid fa-ellipsis-h'></i></td>
-            </tr>
-
-            <tr>
-              <td><i className="fa-regular fa-file-pdf file-ic pdf" /> <strong>mvr_report.pdf</strong></td>
-              <td>John Doe</td>
-              <td>Driver MVR</td>
-              <td><span className="int-status-badge warning">Expiring</span></td>
-              <td>2025-10-20</td>
-              <td><i className='fa-solid fa-ellipsis-h'></i></td>
-            </tr>
-
-            <tr>
-              <td><i className="fa-regular fa-file-word file-ic doc" /> <strong>broker_contract.docx</strong></td>
-              <td>Midwest Logistics</td>
-              <td>Agreement</td>
-              <td><span className="int-status-badge pending">Pending</span></td>
-              <td>—</td>
-              <td><i className='fa-solid fa-ellipsis-h'></i></td>
-            </tr>
+            {visibleDocs.length === 0 ? (
+              <tr>
+                <td colSpan={6}>No documents found.</td>
+              </tr>
+            ) : (
+              visibleDocs.map((d) => (
+                <tr key={d?.id || d?.document_id || d?.filename}>
+                  <td><i className="fa-regular fa-file-pdf file-ic pdf" /> <strong>{d?.filename || d?.name || 'document'}</strong></td>
+                  <td>{d?.owner_name || d?.uploaded_by_name || '—'}</td>
+                  <td>{d?.document_type || d?.type || 'General'}</td>
+                  <td><span className="int-status-badge active">{d?.status || 'Uploaded'}</span></td>
+                  <td>{d?.expiry_date || '—'}</td>
+                  <td><i className='fa-solid fa-ellipsis-h'></i></td>
+                </tr>
+              ))
+            )}
           </tbody>
         </table>
       </div>

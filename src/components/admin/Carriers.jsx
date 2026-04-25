@@ -1,13 +1,15 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import { PulsePanel } from './AdminShared';
 import useAdminManagementUsers from '../../hooks/useAdminManagementUsers';
 import { useUserSettings } from '../../contexts/UserSettingsContext';
 import { formatDateTime } from '../../utils/dateTimeFormat';
 import { downloadCsv } from '../../utils/fileDownload';
+import { postJson } from '../../api/http';
 
-export default function Carriers(){
+export default function Carriers({ onOpenUser }){
   const { settings } = useUserSettings();
   const { items: carriers, metrics: apiMetrics, loading, error } = useAdminManagementUsers({ role: 'carrier', limit: 250, refreshMs: 5000 });
+  const [busyAction, setBusyAction] = useState('');
 
   const cards = useMemo(() => {
     const list = Array.isArray(carriers) ? carriers : [];
@@ -57,6 +59,23 @@ export default function Carriers(){
     downloadCsv('admin_carriers_summary', rows, ['id', 'carrier', 'mc_dot', 'email', 'status', 'updated']);
   };
 
+  const runBatchAction = async (action) => {
+    if (busyAction) return;
+    setBusyAction(action);
+    try {
+      const res = await postJson('/admin/users/batch-action', {
+        action,
+        role: 'carrier',
+        limit: 200,
+      });
+      alert(`${action} completed for ${Number(res?.updated || 0)} carrier(s).`);
+    } catch (e) {
+      alert(e?.message || `Failed to ${action} carriers`);
+    } finally {
+      setBusyAction('');
+    }
+  };
+
   return (
     <div>
       <header className="fp-header adm-analytics-header">
@@ -104,7 +123,7 @@ export default function Carriers(){
                         <td className="carrier-res">{c?.email || '—'}</td>
                         <td><span className={`int-status-badge ${status.cls}`}>{status.text}</span></td>
                         <td className="carrier-res">{when}</td>
-                        <td className="carrier-actions"><a className="card-action">View</a></td>
+                        <td className="carrier-actions"><button type="button" className="card-action" onClick={() => onOpenUser?.(c?.id)}>View</button></td>
                       </tr>
                     );
                   })
@@ -122,8 +141,8 @@ export default function Carriers(){
                 <div className="aai-text"><strong>AI Summary:</strong> 14 carriers verified by sub admins. 1 auto flagged for missing insurance</div>
               </div>
               <div className="aai-actions">
-                <button className="btn small ghost-cd"><i className="fa fa-check" aria-hidden="true"></i> Confirm All</button>
-                <button className="btn small ghost-cd"><i className="fa fa-times" aria-hidden="true"></i> Send Back</button>
+                <button className="btn small ghost-cd" type="button" onClick={() => runBatchAction('confirm')} disabled={!!busyAction}><i className="fa fa-check" aria-hidden="true"></i> Confirm All</button>
+                <button className="btn small ghost-cd" type="button" onClick={() => runBatchAction('send_back')} disabled={!!busyAction}><i className="fa fa-times" aria-hidden="true"></i> Send Back</button>
                 <button className="btn small ghost-cd" type="button" onClick={handleExportSummary}><i className="fa fa-file-export" aria-hidden="true"></i> Export Summary</button>
               </div>
             </div>

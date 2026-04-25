@@ -2,6 +2,7 @@ import React from 'react';
 import '../../styles/admin/HiringOnboarding.css';
 import '../../styles/admin/Tasks.css';
 import AdminShared, { PulsePanel } from './AdminShared';
+import { getJson, postJson } from '../../api/http';
 
 export default function HiringOnboarding(){
   const stats = [
@@ -13,13 +14,37 @@ export default function HiringOnboarding(){
     { label: 'Unread Messages', value: 7 , icon: 'fa-solid fa-envelope'}
   ];
 
-  const rows = [
-    { type: 'Carrier', name: 'First 1 Trucking LLC', role: 'Fleet', assigned: 'Amina', missing: '2 (COI, W9)', status: 'Pending', progress: 70 },
-    { type: 'Driver', name: 'Jama Ali', role: 'CDL A', assigned: 'Koshin', missing: '1 (Consent)', status: 'Active', progress: 100 },
-    { type: 'Internal', name: 'Abdirahman', role: 'Ops Manager', assigned: 'Farhan', missing: '0', status: 'Hired', progress: 100 }
-  ];
+  const [rows, setRows] = React.useState([]);
 
   const [tab, setTab] = React.useState('all');
+
+  const loadRows = React.useCallback(async () => {
+    try {
+      const data = await getJson('/admin/hiring/onboardings?limit=200');
+      const items = Array.isArray(data?.items) ? data.items : [];
+      setRows(items.map((r) => ({
+        ...r,
+        missing: Number(r?.missing || 0) > 0 ? `${Number(r.missing)} missing` : '0',
+      })));
+    } catch (e) {
+      setRows([]);
+      alert(e?.message || 'Failed to load onboarding records');
+    }
+  }, []);
+
+  React.useEffect(() => {
+    loadRows();
+  }, [loadRows]);
+
+  const doAction = async (id, action) => {
+    try {
+      const payload = action === 'assign' ? { action, assigned: 'Operations' } : { action };
+      await postJson(`/admin/hiring/onboardings/${encodeURIComponent(id)}/action`, payload);
+      await loadRows();
+    } catch (e) {
+      alert(e?.message || `Failed to ${action}`);
+    }
+  };
 
   return (
     <div className="admin-hiring-root fp-dashboard-root">
@@ -28,7 +53,7 @@ export default function HiringOnboarding(){
                 <span className="aai-icon"><i className="fa fa-info-circle" aria-hidden="true"></i></span>
                 <div className="aai-text"><strong>AI Summary:</strong> 15 onboardings in progress — 3 missing signatures, 2 inactive, 10 near completion <br /> <span style={{marginTop: '10px', fontWeight: '600'}}>Document Vault • Messaging Center • Compliance Tracker</span> </div>
               </div>
-              <button className="btn small-cd"><i className="fa fa-add" aria-hidden="true"></i> New Onboarding</button>
+              <button className="btn small-cd" type="button" onClick={loadRows}><i className="fa fa-add" aria-hidden="true"></i> New Onboarding</button>
             </div>
 
       <section className="sstat-row" style={{marginTop: '20px'}}>
@@ -93,7 +118,7 @@ export default function HiringOnboarding(){
                       </div>
                     </td>
                     <td>Oct {10 + i}</td>
-                    <td><div className="task-actions"><i className="fa-solid fa-ellipsis-h"/></div></td>
+                    <td><div className="task-actions"><button className="card-action" type="button" onClick={() => doAction(r.id, 'assign')}>Assign</button> <button className="card-action" type="button" onClick={() => doAction(r.id, 'complete')}>Complete</button></div></td>
                   </tr>
                 ))}
               </tbody>
@@ -140,9 +165,9 @@ export default function HiringOnboarding(){
               <div className="ai-summary-left">
               </div>
               <div className="aai-actions">
-                <button className="btn small ghost-cd"><i className="fa fa-brain" aria-hidden="true"></i> AI Summary</button>
-                <button className="btn small ghost-cd"><i className="fa fa-users" aria-hidden="true"></i> Bulk Assign</button>
-                <button className="btn small ghost-cd"><i className="fa fa-sync" aria-hidden="true"></i> Sync Vault</button>
+                <button className="btn small ghost-cd" type="button" onClick={loadRows}><i className="fa fa-brain" aria-hidden="true"></i> AI Summary</button>
+                <button className="btn small ghost-cd" type="button" onClick={() => rows[0]?.id && doAction(rows[0].id, 'assign')}><i className="fa fa-users" aria-hidden="true"></i> Bulk Assign</button>
+                <button className="btn small ghost-cd" type="button" onClick={() => rows[0]?.id && doAction(rows[0].id, 'sync')}><i className="fa fa-sync" aria-hidden="true"></i> Sync Vault</button>
               </div>
             </div>
 

@@ -1,30 +1,87 @@
 import React from 'react';
 import '../../styles/admin/Tasks.css';
-import AdminShared, { PulsePanel, CarriersTable } from './AdminShared';
+import { PulsePanel } from './AdminShared';
+import { getJson, postJson } from '../../api/http';
 
 export default function Tasks() {
   const [tab, setTab] = React.useState('all');
-  const rows = [
-    { title: 'Verify carrier documents', module: 'Compliance', assigned: 'Lisa', priority: 'High', due: 'Oct 14', status: 'In Progress' },
-    { title: 'Send broker reminder', module: 'Messages', assigned: 'Ahmed', priority: 'Medium', due: 'Oct 13', status: 'Overdue' },
-    { title: 'Update campaign copy', module: 'Marketing', assigned: 'Farhia', priority: 'Low', due: 'Oct 18', status: 'Done' },
-    { title: 'Review onboarding docs', module: 'Hiring', assigned: 'You', priority: 'Medium', due: 'Oct 20', status: 'In Progress' }
-  ];
-  const cards = [
-    { variant:'green', label:'Completed This Week', value:'42', actionLabel:'View List', iconClass:'fa-check' },
-    { variant:'yellow', label:'In Progress', value:'18', actionLabel:'Review', iconClass:'fa-clock' },
-    { variant:'red', label:'Overdue', value:'6', actionLabel:'List', iconClass:'fa-triangle-exclamation' },
-    { variant:'blue', label:'AI Auto-Created', value:'12', actionLabel:'Open', iconClass:'fa-brain' }
-  ];
+  const [rows, setRows] = React.useState([]);
+  const [loading, setLoading] = React.useState(false);
+
+  const loadTasks = React.useCallback(async () => {
+    setLoading(true);
+    try {
+      const status = tab === 'done' ? 'done' : 'all';
+      const data = await getJson(`/admin/tasks?status=${encodeURIComponent(status)}&limit=200`);
+      const items = Array.isArray(data?.items) ? data.items : [];
+      setRows(items);
+    } catch (e) {
+      setRows([]);
+      alert(e?.message || 'Failed to load tasks');
+    } finally {
+      setLoading(false);
+    }
+  }, [tab]);
+
+  React.useEffect(() => {
+    loadTasks();
+  }, [loadTasks]);
+
+  const cards = React.useMemo(() => {
+    const total = rows.length;
+    const done = rows.filter((r) => String(r?.status || '').toLowerCase() === 'done').length;
+    const inProgress = rows.filter((r) => String(r?.status || '').toLowerCase().includes('progress')).length;
+    const overdue = rows.filter((r) => String(r?.status || '').toLowerCase() === 'overdue').length;
+    return [
+      { variant:'green', label:'Completed', value:String(done), actionLabel:'View List', iconClass:'fa-check' },
+      { variant:'yellow', label:'In Progress', value:String(inProgress), actionLabel:'Review', iconClass:'fa-clock' },
+      { variant:'red', label:'Overdue', value:String(overdue), actionLabel:'List', iconClass:'fa-triangle-exclamation' },
+      { variant:'blue', label:'Total Tasks', value:String(total), actionLabel:'Open', iconClass:'fa-list-check' }
+    ];
+  }, [rows]);
 
   const filteredRows = React.useMemo(() => {
-    if (tab === 'all') return rows;
-    if (tab === 'team') return rows.filter(r => r.assigned === 'You');
-    if (tab === 'done') return rows.filter(r => r.status === 'Done');
-    // insights - placeholder: return rows with overdue/high priority
-    if (tab === 'insights') return rows.filter(r => r.priority === 'High' || r.status === 'Overdue');
-    return rows;
-  }, [tab]);
+    const list = Array.isArray(rows) ? rows : [];
+    if (tab === 'all') return list;
+    if (tab === 'team') return list.filter((r) => String(r?.assigned || '').toLowerCase() === 'you');
+    if (tab === 'done') return list.filter((r) => String(r?.status || '').toLowerCase() === 'done');
+    if (tab === 'insights') return list.filter((r) => String(r?.priority || '').toLowerCase() === 'high' || String(r?.status || '').toLowerCase() === 'overdue');
+    return list;
+  }, [tab, rows]);
+
+  const createTask = async () => {
+    try {
+      await postJson('/admin/tasks', {
+        title: 'New admin task',
+        module: 'Operations',
+        assigned: 'You',
+        priority: 'Medium',
+        due: 'Today',
+        status: 'In Progress',
+      });
+      await loadTasks();
+    } catch (e) {
+      alert(e?.message || 'Failed to create task');
+    }
+  };
+
+  const markDone = async (taskId) => {
+    try {
+      await postJson(`/admin/tasks/${encodeURIComponent(taskId)}/complete`, {});
+      await loadTasks();
+    } catch (e) {
+      alert(e?.message || 'Failed to mark task done');
+    }
+  };
+
+  const reassignTask = async (taskId) => {
+    try {
+      await postJson(`/admin/tasks/${encodeURIComponent(taskId)}/reassign`, { assigned: 'Support' });
+      await loadTasks();
+    } catch (e) {
+      alert(e?.message || 'Failed to reassign task');
+    }
+  };
 
 
   return (
@@ -33,8 +90,8 @@ export default function Tasks() {
         <div className="fp-header-titles"><h2>Tasks & To-Do Overview</h2></div>
       </header>
       <div className="tasks-actions" style={{marginBottom: '20px'}}>
-          <button className="btn small-cd">+ New Task</button>
-          <button className="btn small ghost-cd">Auto-Assign</button>
+          <button className="btn small-cd" type="button" onClick={createTask}>+ New Task</button>
+          <button className="btn small ghost-cd" type="button" onClick={loadTasks}>Auto-Assign</button>
         </div>
 
         <PulsePanel cards={cards} />
@@ -52,7 +109,9 @@ export default function Tasks() {
               <tr><th>Task</th><th>Module</th><th>Assigned To</th><th>Priority</th><th>Due Date</th><th>Status</th><th>Actions</th></tr>
             </thead>
             <tbody>
-              {filteredRows.map((r,i) => (
+              {loading ? (
+                <tr><td colSpan={7}>Loading tasks...</td></tr>
+              ) : filteredRows.map((r,i) => (
                 <tr key={i} className={`task-row ${r.status === 'Overdue' ? 'overdue' : ''}`}>
                   <td className="task-title">{r.title}</td>
                   <td>{r.module}</td>
@@ -60,7 +119,7 @@ export default function Tasks() {
                   <td><span className={`int-status-badge ${r.priority.toLowerCase() === 'high' ? 'disconnected' : r.priority.toLowerCase() === 'medium' ? 'warning' : 'active'}`}>{r.priority}</span></td>
                   <td>{r.due}</td>
                   <td><span className={`int-status-badge ${r.status === 'Done' ? 'resolved' : r.status === 'Overdue' ? 'revoked' : 'in-progress'}`}>{r.status}</span></td>
-                  <td><div className="task-actions"><i className="fa-solid fa-ellipsis-h"/></div></td>
+                  <td><div className="task-actions"><button type="button" className="card-action" onClick={() => markDone(r.id)}>Done</button></div></td>
                 </tr>
               ))}
             </tbody>
@@ -88,7 +147,7 @@ export default function Tasks() {
               <div className="detail-row"><div className="detail-label">Due Date:</div><div className="detail-value">Oct 14</div></div>
               <div className="detail-row"><div className="detail-label">Progress:</div><div className="detail-value">75%</div></div>
               <div className="detail-row progress-row"><div className="progress"><div className="progress-fill" style={{width:'75%'}}/></div></div>
-            <div style={{marginTop:12}}><button className="btn small-cd">Mark Done</button> <button className="btn small ghost-cd">Reassign</button></div>
+            <div style={{marginTop:12}}><button className="btn small-cd" type="button" disabled={!filteredRows[0]?.id} onClick={() => filteredRows[0]?.id && markDone(filteredRows[0].id)}>Mark Done</button> <button className="btn small ghost-cd" type="button" disabled={!filteredRows[0]?.id} onClick={() => filteredRows[0]?.id && reassignTask(filteredRows[0].id)}>Reassign</button></div>
           </div>
         </aside>
       </div>

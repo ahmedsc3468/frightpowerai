@@ -27,6 +27,7 @@ import SupportHub from '../super_admin/SupportHub';
 import SystemSettings from '../super_admin/SystemSettings';
 import AdminApprovals from '../super_admin/AdminApprovals';
 import RemovalApprovals from '../super_admin/RemovalApprovals';
+import UserDetailsModal from '../admin/UserDetailsModal';
 import logo from '/src/assets/logo.png';
 import { AUTO_REFRESH_MS } from '../../constants/refresh';
 import resp_logo from '/src/assets/logo_1.png';
@@ -49,6 +50,9 @@ export default function SuperAdminDashboard(){
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [searchLoading, setSearchLoading] = useState(false);
+  const [selectedUserId, setSelectedUserId] = useState(null);
+  const [userModalOpen, setUserModalOpen] = useState(false);
+  const [initialThreadId, setInitialThreadId] = useState(null);
 
   const handleExportReport = () => {
     const report = {
@@ -268,6 +272,13 @@ export default function SuperAdminDashboard(){
     navigate('/super-admin/login', { replace: true });
   };
 
+  const openUserModal = (uid) => {
+    const value = String(uid || '').trim();
+    if (!value) return;
+    setSelectedUserId(value);
+    setUserModalOpen(true);
+  };
+
   const performSearch = async (query) => {
     if (!query || query.trim().length < 2) {
       setSearchResults([]);
@@ -298,8 +309,11 @@ export default function SuperAdminDashboard(){
       // Process users
       if (usersRes.status === 'fulfilled' && usersRes.value.ok) {
         const usersData = await usersRes.value.json();
-        if (Array.isArray(usersData.items)) {
-          usersData.items.forEach(user => {
+        const users = Array.isArray(usersData?.items)
+          ? usersData.items
+          : (Array.isArray(usersData?.users) ? usersData.users : []);
+        if (users.length > 0) {
+          users.forEach(user => {
             results.push({
               type: 'user',
               name: user.name || user.email || user.uid,
@@ -328,8 +342,11 @@ export default function SuperAdminDashboard(){
       // Process documents
       if (documentsRes.status === 'fulfilled' && documentsRes.value.ok) {
         const documentsData = await documentsRes.value.json();
-        if (Array.isArray(documentsData.documents)) {
-          documentsData.documents.forEach(doc => {
+        const documents = Array.isArray(documentsData?.documents)
+          ? documentsData.documents
+          : (Array.isArray(documentsData?.items) ? documentsData.items : []);
+        if (documents.length > 0) {
+          documents.forEach(doc => {
             results.push({
               type: 'document',
               name: doc.name || doc.file_name || 'Document',
@@ -673,6 +690,40 @@ export default function SuperAdminDashboard(){
         {isSidebarOpen && <div className="overlay" onClick={() => setIsSidebarOpen(false)} />}
 
         <main className="adm-main fp-main">
+          <UserDetailsModal
+            open={userModalOpen}
+            userId={selectedUserId}
+            onClose={() => setUserModalOpen(false)}
+            onSendMessage={async (u) => {
+              try {
+                const targetUid = String(u?.uid || '').trim();
+                if (!targetUid) return;
+                const user = auth.currentUser;
+                if (!user) return;
+                const idToken = await getIdToken(user);
+                const res = await fetch(`${API_URL}/messaging/admin/threads/direct`, {
+                  method: 'POST',
+                  headers: {
+                    Authorization: `Bearer ${idToken}`,
+                    'Content-Type': 'application/json',
+                  },
+                  body: JSON.stringify({ target_uid: targetUid }),
+                });
+                if (res.ok) {
+                  const data = await res.json().catch(() => ({}));
+                  const tid = data?.thread?.id || data?.thread_id || null;
+                  setInitialThreadId(tid);
+                }
+              } catch (e) {
+                console.error('Failed to open direct thread:', e);
+              } finally {
+                setUserModalOpen(false);
+                setActiveNav('messages');
+                navigate('/super-admin/messages');
+              }
+            }}
+          />
+
           {activeNav === 'dashboard' && (
             <div>
             <div className="ai-summary" style={{marginBottom: '20px'}}>
@@ -738,13 +789,13 @@ export default function SuperAdminDashboard(){
             </div>
           </section>
           <div className='sa-buttons-btm'>
-            <button className='btn small-cd'><i className='fas fa-user-plus'></i>Add User</button>
+            <button className='btn small-cd' onClick={() => navigate('/super-admin/users')}><i className='fas fa-user-plus'></i>Add User</button>
             <button className='btn small ghost-cd' onClick={() => navigate('/super-admin/admin-approvals')}>
               <i className='fas fa-user-check'></i>Admin Approvals
             </button>
             <button className='btn small ghost-cd' onClick={handleExportReport}><i className='fas fa-file-export'></i>Export Report</button>
-            <button className='btn small ghost-cd'><i className='fas fa-bullhorn'></i>Send Announcement</button>
-            <button className='btn small ghost-cd'><i className='fas fa-shield-halved'></i>Open Compliance</button>
+            <button className='btn small ghost-cd' onClick={() => navigate('/super-admin/messages')}><i className='fas fa-bullhorn'></i>Send Announcement</button>
+            <button className='btn small ghost-cd' onClick={() => navigate('/super-admin/compliance-audit')}><i className='fas fa-shield-halved'></i>Open Compliance</button>
           </div>
           </div>
           )}  
@@ -833,18 +884,18 @@ export default function SuperAdminDashboard(){
 
           {activeNav === 'tracking' && <TrackingVisibility /> }
           {activeNav === 'analytics' && <AdminAnalytics /> }
-          {activeNav === 'users' && <UsersRoles /> }
+          {activeNav === 'users' && <UsersRoles onOpenUser={openUserModal} /> }
           {activeNav === 'admin-approvals' && <AdminApprovals /> }
           {activeNav === 'removal-approvals' && <RemovalApprovals /> }
-            {activeNav === 'carriers' && <Carriers /> }
-            {activeNav === 'drivers' && <Drivers /> }
-            {activeNav === 'shippers' && <Shippers /> }
+            {activeNav === 'carriers' && <Carriers onOpenUser={openUserModal} /> }
+            {activeNav === 'drivers' && <Drivers onOpenUser={openUserModal} /> }
+            {activeNav === 'shippers' && <Shippers onOpenUser={openUserModal} /> }
             {activeNav === 'service-providers' && <ServiceProviders /> }
             {activeNav === 'marketplace' && <AdminMarketplace /> }
             {activeNav === 'document-vault' && <AdminDocumentVault /> }
             {activeNav === 'compliance-audit' && <ComplianceAudit /> }
             {activeNav === 'finance-billing' && <FinanceBilling /> }
-            {activeNav === 'messages' && (<AdminMessaging /> )}
+            {activeNav === 'messages' && (<AdminMessaging initialThreadId={initialThreadId} /> )}
             {activeNav === 'marketing' && <MarketingPromotion /> }
             {activeNav === 'ai-hub' && <AiHub /> }
             {activeNav === 'integrations' && <IntegrationsManager /> }

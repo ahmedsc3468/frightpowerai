@@ -1,11 +1,13 @@
-import React, { useMemo } from 'react'
+import React, { useMemo, useState } from 'react'
 import '../../styles/admin/UsersRoles.css'
 import { PulsePanel } from './AdminShared'
 import useAdminManagementUsers from '../../hooks/useAdminManagementUsers'
 import { downloadCsv } from '../../utils/fileDownload'
+import { postJson } from '../../api/http'
 
-export default function Drivers(){
+export default function Drivers({ onOpenUser }){
   const { items: drivers, metrics: apiMetrics, loading, error } = useAdminManagementUsers({ role: 'driver', limit: 300, refreshMs: 5000 });
+  const [busyAction, setBusyAction] = useState('');
 
   const cards = useMemo(() => {
     const list = Array.isArray(drivers) ? drivers : [];
@@ -55,6 +57,23 @@ export default function Drivers(){
     downloadCsv('admin_drivers_summary', rows, ['id', 'driver', 'type', 'region', 'managed_by', 'status', 'updated']);
   };
 
+  const runBatchAction = async (action) => {
+    if (busyAction) return;
+    setBusyAction(action);
+    try {
+      const res = await postJson('/admin/users/batch-action', {
+        action,
+        role: 'driver',
+        limit: 200,
+      });
+      alert(`${action} completed for ${Number(res?.updated || 0)} driver(s).`);
+    } catch (e) {
+      alert(e?.message || `Failed to ${action} drivers`);
+    } finally {
+      setBusyAction('');
+    }
+  };
+
   return (
     <div>
         <header className="fp-header adm-analytics-header">
@@ -98,7 +117,7 @@ export default function Drivers(){
                       <td>{region}</td>
                       <td>{managedBy}</td>
                       <td><span className={`int-status-badge ${status.cls}`}>{status.text}</span></td>
-                      <td className="carrier-actions"><a className="card-action">View</a></td>
+                      <td className="carrier-actions"><button type="button" className="card-action" onClick={() => onOpenUser?.(d?.id)}>View</button></td>
                     </tr>
                   );
                 })
@@ -116,8 +135,8 @@ export default function Drivers(){
                 <div className="aai-text"><strong>AI Summary:</strong> 24 drivers verified this week. 5 pending Marketplace approval. 2 flagged for expiring MVR checks.</div>
               </div>
               <div className="aai-actions">
-                <button className="btn small ghost-cd"><i className="fa fa-check" aria-hidden="true"></i> Confirm All</button>
-                <button className="btn small ghost-cd"><i className="fa fa-times" aria-hidden="true"></i> Send Back</button>
+                <button className="btn small ghost-cd" type="button" onClick={() => runBatchAction('confirm')} disabled={!!busyAction}><i className="fa fa-check" aria-hidden="true"></i> Confirm All</button>
+                <button className="btn small ghost-cd" type="button" onClick={() => runBatchAction('send_back')} disabled={!!busyAction}><i className="fa fa-times" aria-hidden="true"></i> Send Back</button>
                 <button className="btn small ghost-cd" type="button" onClick={handleExportSummary}><i className="fa fa-file-export" aria-hidden="true"></i> Export Summary</button>
               </div>
             </div>

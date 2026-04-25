@@ -20,7 +20,7 @@ function PulseCard({variant, label, value, actionLabel, iconClass}){
   )
 }
 
-export default function UsersRoles(){
+export default function UsersRoles({ onOpenUser }){
   const { settings } = useUserSettings();
   const { items: users, metrics: apiMetrics, loading, error } = useAdminManagementUsers({ role: 'all', limit: 250, refreshMs: 5000 });
 
@@ -142,7 +142,7 @@ export default function UsersRoles(){
                         <td>{manager}</td>
                         <td><span className={`int-status-badge ${status.cls}`}>{status.text}</span></td>
                         <td>{formatWhen(u?.last_login_at || u?.updated_at || u?.created_at)}</td>
-                        <td><i className="fa-solid fa-ellipsis-h"></i></td>
+                        <td><button type="button" className="card-action" onClick={() => onOpenUser?.(u?.id)}>View</button></td>
                       </tr>
                     );
                   })

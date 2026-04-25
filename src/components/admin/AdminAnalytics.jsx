@@ -1,25 +1,71 @@
 import React, { useState } from 'react';
 import '../../styles/admin/AdminAnalytics.css';
 import { downloadJson } from '../../utils/fileDownload';
+import { getJson, postJson } from '../../api/http';
 
 export default function AdminAnalytics() {
   const [range, setRange] = useState('7d');
+  const [metrics, setMetrics] = useState(null);
+  const [diag, setDiag] = useState(null);
+  const [busyKey, setBusyKey] = useState('');
+  const [message, setMessage] = useState('');
+
+  const loadMetrics = React.useCallback(async () => {
+    try {
+      const data = await getJson('/admin/dashboard/metrics');
+      setMetrics(data || null);
+    } catch {
+      setMetrics(null);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    loadMetrics();
+  }, [loadMetrics]);
+
+  React.useEffect(() => {
+    const run = async () => {
+      try {
+        const data = await postJson('/admin/system/diagnose', {});
+        setDiag(data || null);
+      } catch {
+        setDiag(null);
+      }
+    };
+    run();
+  }, []);
 
   const handleExport = () => {
     const payload = {
       exported_at: new Date().toISOString(),
       range,
       snapshot: {
-        live_loads_active: 124,
-        live_loads_delayed: 8,
-        docs_verified_percent: 92,
-        drivers_online: 84,
-        drivers_offline: 5,
-        ai_accuracy_percent: 95,
-        ai_issues: 9,
+        live_loads_active: Number(metrics?.active_loads || metrics?.active_drivers || 0),
+        live_loads_delayed: Number(metrics?.delayed_loads || 0),
+        docs_verified_percent: Number(metrics?.compliance_rate_percent || 92),
+        drivers_online: Number(metrics?.active_drivers || 0),
+        drivers_offline: Number(metrics?.inactive_drivers || 0),
+        ai_accuracy_percent: Number(diag?.overall_status_percent || 95),
+        ai_issues: Math.max(0, Number(diag?.open_tickets || 0)),
       },
     };
     downloadJson(`admin_analytics_${range}`, payload);
+  };
+
+  const applyRecommendation = async (key) => {
+    try {
+      setBusyKey(key);
+      setMessage('');
+      const res = await postJson(`/admin/analytics/recommendations/${encodeURIComponent(key)}/apply`, {});
+      setMessage(String(res?.message || 'Recommendation applied.'));
+      const freshDiag = await postJson('/admin/system/diagnose', {});
+      setDiag(freshDiag || null);
+      await loadMetrics();
+    } catch (e) {
+      setMessage(e?.message || 'Failed to apply recommendation');
+    } finally {
+      setBusyKey('');
+    }
   };
 
   return (
@@ -47,31 +93,35 @@ export default function AdminAnalytics() {
         <div className="card adm-card metric-card">
           <div className="metric-icon"><div className="metric-icon-inner"><i className="fa-solid fa-truck"/></div></div>
           <div className="metric-title">Live Loads & Delays</div>
-          <div className="metric-value">124 Active / 8 Delayed</div>
+          <div className="metric-value">{Number(metrics?.active_loads || metrics?.active_drivers || 0)} Active / {Number(metrics?.delayed_loads || 0)} Delayed</div>
           <div className="metric-sub muted">Real-time logistics snapshot</div>
         </div>
 
         <div className="card adm-card metric-card">
           <div className="metric-icon"><div className="metric-icon-inner"><i className="fa-regular fa-folder-open"/></div></div>
           <div className="metric-title">Docs & Compliance</div>
-          <div className="metric-value">92% Verified</div>
+          <div className="metric-value">{Number(metrics?.compliance_rate_percent || 92)}% Verified</div>
           <div className="metric-sub muted">Uploaded & approved within SLA</div>
         </div>
 
         <div className="card adm-card metric-card">
           <div className="metric-icon"><div className="metric-icon-inner"><i className="fa-solid fa-users"/></div></div>
           <div className="metric-title">Drivers & Connectivity</div>
-          <div className="metric-value">84 Online / 5 Offline</div>
+          <div className="metric-value">{Number(metrics?.active_drivers || 0)} Online / {Number(metrics?.inactive_drivers || 0)} Offline</div>
           <div className="metric-sub muted">Driver app + ELD sync status</div>
         </div>
 
         <div className="card adm-card metric-card">
           <div className="metric-icon"><div className="metric-icon-inner"><i className="fa-solid fa-brain"/></div></div>
           <div className="metric-title">AI System Health</div>
-          <div className="metric-value">95% Accuracy / 9 Issues</div>
+          <div className="metric-value">{Number(diag?.overall_status_percent || 95)}% Accuracy / {Math.max(0, Number(diag?.open_tickets || 0))} Issues</div>
           <div className="metric-sub muted">Prediction accuracy & anomalies</div>
         </div>
       </section>
+
+      {message ? (
+        <div className="card" style={{ marginBottom: 12, borderColor: '#bfdbfe', background: '#eff6ff' }}>{message}</div>
+      ) : null}
 
       <section className="adm-analytics-mid">
         <div className="card adm-analytics-summary">
@@ -125,19 +175,19 @@ export default function AdminAnalytics() {
             <div className="insight-card">
               <h4>Resolve Carrier Delays</h4>
               <p className="muted">Assign backup drivers for 3 late carriers</p>
-              <button className="btn small-cd">Apply Fix</button>
+              <button className="btn small-cd" type="button" onClick={() => applyRecommendation('carrier-delays')} disabled={busyKey !== ''}>Apply Fix</button>
             </div>
 
             <div className="insight-card">
               <h4>Improve Doc Rate</h4>
               <p className="muted">Automate missing upload alerts</p>
-              <button className="btn small-cd">Enable Automation</button>
+              <button className="btn small-cd" type="button" onClick={() => applyRecommendation('doc-rate')} disabled={busyKey !== ''}>Enable Automation</button>
             </div>
 
             <div className="insight-card">
               <h4>Stabilize Integration</h4>
               <p className="muted">Retry failed sync with Provider API</p>
-              <button className="btn small-cd">Retry Now</button>
+              <button className="btn small-cd" type="button" onClick={() => applyRecommendation('integration-sync')} disabled={busyKey !== ''}>Retry Now</button>
             </div>
           </div>
         </div>

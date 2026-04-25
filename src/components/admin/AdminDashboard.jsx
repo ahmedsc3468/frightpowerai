@@ -509,19 +509,19 @@ export default function AdminDashboard() {
           )}
 
           {activeNav === 'users' && (
-            <UsersRoles />
+            <UsersRoles onOpenUser={openUserModal} />
           )}
 
           {activeNav === 'carriers' && (
-            <Carriers />
+            <Carriers onOpenUser={openUserModal} />
           )}
 
           {activeNav === 'shippers' && (
-            <Shippers />
+            <Shippers onOpenUser={openUserModal} />
           )}
 
           {activeNav === 'drivers' && (
-            <Drivers />
+            <Drivers onOpenUser={openUserModal} />
           )}
 
           {activeNav === 'service-providers' && (
